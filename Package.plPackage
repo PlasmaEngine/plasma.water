@@ -1,0 +1,63 @@
+// plasma.water — profile-driven water rendering and simulation.
+//
+// The AUTHORED manifest, kept in source next to the plugin. It declares identity, compatibility,
+// what to load and what to ship. Component hashes and sizes are NOT here: the packaging step
+// computes those and emits them into the published manifest that ships inside the .plpkg.
+//
+// Field reference and validation rules: Docs/PluginPackageManagerPlan.html §05.
+
+PackageInfo
+{
+	// ---- identity -------------------------------------------------------------
+	// Version starts at 1.0.0 rather than inheriting an engine version: this package
+	// versions on its own changes from now on, not on the engine's.
+	string %Id{"plasma.water"}
+	string %Version{"1.0.0"}
+	string %Publisher{"PlasmaTechnology"}
+	string %License{"MIT"}
+	string %Homepage{"https://plasmagameengine.com"}
+
+	// ---- compatibility --------------------------------------------------------
+	// Must equal plSdkVersion::GetAbiTag() of the engine these binaries were built
+	// against. The build configuration is part of it - a Development and a Shipping
+	// build do not share a binary interface.
+	string %MinEngineVersion{"0.7.0"}
+	string %MaxEngineVersion{"0.7.0"}
+	string %AbiTag{"win64-msvc19-0.7.0-dev"}
+
+	// ---- presentation ---------------------------------------------------------
+	// The bundle carried no artwork at all, so this is drawn rather than moved. The
+	// motif and palette come from EditorPluginWater/QtResources/Water.svg, which is
+	// what the component icons already use.
+	string %DisplayName{"Water"}
+	string %Category{"Rendering"}
+	string %Description{"Profile-driven oceans, rivers and lakes, with junctions, wave interaction, buoyancy hooks and underwater rendering.
+
+The water shaders and the default Ocean/River/Lake profiles ship with the engine rather than with this package, so installing it needs nothing further."}
+	string %Icon{"Branding/WaterIcon.png"}
+	string %Banner{"Branding/WaterBanner.png"}
+
+	// ---- binaries -------------------------------------------------------------
+	// Three plugins: the runtime, the editor-engine-process side that renders the
+	// scene view, and the editor UI.
+	string %EditorPlugins{"plEditorPluginWater"}
+	string %EditorEnginePlugins{"plEnginePluginWater"}
+	string %RuntimePlugins{"plWaterPlugin"}
+	string %PackageDependencies{}
+
+	// ---- dependencies ---------------------------------------------------------
+	// None. It binds to GameEngine and RendererCore, which are part of the engine
+	// rather than packages, so there is nothing to resolve.
+	//
+	// WaterTerrainBridge declares RequiredPlugins{"Water, Terrain"} and stays in the
+	// engine for now. It reaches water only through reflection - IsType(...,
+	// "plWaterBodyComponent") - and includes no water header, so it needs this
+	// package present at run time but does not link against it.
+
+	// ---- components -----------------------------------------------------------
+	Component { string %Name{"manifest"} string %Platform{"any"} }
+	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
+	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
+	Component { string %Name{"icon"} string %Platform{"any"} }
+	Component { string %Name{"banner"} string %Platform{"any"} }
+}

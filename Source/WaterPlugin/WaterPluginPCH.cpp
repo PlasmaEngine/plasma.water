@@ -1,0 +1,28 @@
+#include <WaterPlugin/WaterPluginPCH.h>
+
+PL_STATICLINK_LIBRARY(WaterPlugin)
+{
+  if (bReturn)
+    return;
+
+  PL_STATICLINK_REFERENCE(WaterPlugin_Startup);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Components_Implementation_OceanComponent);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Components_Implementation_WaterBodyComponent);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Components_Implementation_WaterExclusionVolumeComponent);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Components_Implementation_WaterInteractorComponent);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Components_Implementation_WaterJunctionComponent);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Components_Implementation_WaterSplinePointComponent);
+  PL_STATICLINK_REFERENCE(WaterPlugin_PostProcessing_Implementation_UnderwaterPass);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Resources_Implementation_WaterProfileResource);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Utils_Implementation_WaterGeometry);
+  PL_STATICLINK_REFERENCE(WaterPlugin_World_Implementation_WaterWorldModule);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterFrameData);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterFrameDataExtractor);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterGpuSimulation);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterPipelineExtension);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterQuality);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterRenderData);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterRenderer);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterSurfacePass);
+  PL_STATICLINK_REFERENCE(WaterPlugin_Rendering_Implementation_WaterUnderwaterPass);
+}
