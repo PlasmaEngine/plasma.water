@@ -11,8 +11,8 @@
 #include <WaterPlugin/Rendering/WaterRenderer.h>
 #include <WaterPlugin/Rendering/WaterSurfacePass.h>
 
-#include <RendererCore/../../../Data/Base/Shaders/Water/WaterDrawConstants.h>
-#include <RendererCore/../../../Data/Base/Shaders/Water/WaterJunctionConstants.h>
+#include <Shaders/Water/WaterDrawConstants.h>
+#include <Shaders/Water/WaterJunctionConstants.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterRenderer, 1, plRTTIDefaultAllocator<plWaterRenderer>)

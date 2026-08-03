@@ -1,0 +1,91 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+CAMERA_MODE
+
+[RENDERSTATE]
+
+DepthTest = false
+DepthWrite = false
+CullMode = CullMode_None
+
+[VERTEXSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleVertexShader.h>
+
+[PIXELSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleInterpolator.h>
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/Water/WaterUnderwaterConstants.h>
+
+Texture2DArray WaterUnderwaterSceneColor;
+Texture2DArray WaterUnderwaterSceneDepth;
+Texture2DArray WaterUnderwaterExitDepth;
+
+float3 SampleUnderwaterScene(float2 uv, uint eyeIndex)
+{
+  return WaterUnderwaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb;
+}
+
+float4 main(PS_IN input) : SV_Target0
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = input.RenderTargetArrayIndex;
+#endif
+  const uint eyeIndex = s_ActiveCameraEyeIndex;
+  const float2 uv = input.TexCoord0.xy;
+  const float waterTime = WaterEffectParams.w;
+  if (WaterCameraParams.z < 0.5)
+    return float4(SampleUnderwaterScene(uv, eyeIndex), 1.0);
+
+  const float distortionScale = WaterEffectParams.x * saturate(WaterCameraParams.x * 0.25 + 0.25);
+  const float2 distortion = float2(
+    sin(uv.y * 29.0 + waterTime * 1.7) + sin(uv.x * 13.0 - waterTime * 0.8),
+    cos(uv.x * 23.0 - waterTime * 1.3) + cos(uv.y * 17.0 + waterTime)) * distortionScale;
+  const float2 candidateDistortedUV = clamp(uv + distortion, 0.001, 0.999);
+
+  const float rawSceneDepth = WaterUnderwaterSceneDepth.SampleLevel(PointClampSampler, float3(uv, eyeIndex), 0).r;
+  const float sceneDistance = LinearizeZBufferDepth(rawSceneDepth);
+  const float distortedRawSceneDepth = WaterUnderwaterSceneDepth.SampleLevel(PointClampSampler, float3(candidateDistortedUV, eyeIndex), 0).r;
+  const float distortedSceneDistance = LinearizeZBufferDepth(distortedRawSceneDepth);
+  const float depthDifference = abs(distortedSceneDistance - sceneDistance);
+  const float depthRejectStart = max(0.1, sceneDistance * 0.01);
+  const float depthRejectEnd = max(0.5, sceneDistance * 0.08);
+  const float distortionDepthValidity = 1.0 - smoothstep(depthRejectStart, depthRejectEnd, depthDifference);
+  const float2 distortedUV = lerp(uv, candidateDistortedUV, distortionDepthValidity);
+  const float exitDistance = WaterUnderwaterExitDepth.SampleLevel(PointClampSampler, float3(uv, eyeIndex), 0).r;
+  const float finiteExitDistance = (WaterCameraParams.w > 0.5 && exitDistance > 0.0) ? exitDistance : WaterCameraParams.y;
+  const float waterDistance = clamp(min(sceneDistance, finiteExitDistance), 0.0, WaterCameraParams.y);
+
+  float3 color = SampleUnderwaterScene(distortedUV, eyeIndex);
+  const float3 extinction = max(WaterAbsorptionAndDensity.xyz, 0.0) + max(WaterAbsorptionAndDensity.w, 0.0).xxx;
+  const float3 transmittance = exp(-extinction * waterDistance);
+  const float3 scattering = WaterScatteringAndIntensity.xyz * (1.0 - transmittance) * WaterScatteringAndIntensity.w * max(WaterProfileParams.x, 0.0);
+  color = color * transmittance + scattering;
+  const float haze = saturate(WaterProfileParams.y) * (1.0 - exp(-waterDistance * 0.035));
+  color = lerp(color, WaterScatteringAndIntensity.xyz * 2.5, haze);
+
+  const float3 worldPosition = ScreenCoordToWorldSpace(uv, rawSceneDepth);
+  // Wave-coherent transmitted caustics are accumulated into the scene color before this pass. Keeping the
+  // old screen-space sine pattern here would double-light underwater receivers and visibly drift away from
+  // the rendered surface waves.
+
+  const float3 viewDirection = normalize(worldPosition - GetCameraPosition());
+  const float shaftAlignment = pow(saturate(dot(viewDirection, WaterMainLightDirectionAndShaftIntensity.xyz)), 8.0);
+  // World-anchored, incommensurate phases remain stable under camera motion and agree between stereo eyes.
+  const float3 shaftSamplePosition = GetCameraPosition() + viewDirection * (0.5 * min(waterDistance, 48.0));
+  const float shaftNoise = 0.5 + 0.5 * (0.55 * sin(dot(shaftSamplePosition, float3(0.31, 0.17, 0.11)) + waterTime * 0.4)
+    + 0.30 * sin(dot(shaftSamplePosition, float3(-0.13, 0.37, 0.19)) - waterTime * 0.31)
+    + 0.15 * sin(dot(shaftSamplePosition, float3(0.23, -0.09, 0.43)) + waterTime * 0.53));
+  const float shaftPathWeight = (1.0 - exp(-waterDistance * 0.12)) * exp(-waterDistance * 0.025);
+  color += WaterMainLightColor.rgb * shaftAlignment * shaftNoise * WaterMainLightDirectionAndShaftIntensity.w * 0.25 * shaftPathWeight;
+
+  const float meniscus = pow(saturate(1.0 - uv.y), 24.0) * saturate(WaterProfileParams.z) * saturate(1.0 - WaterCameraParams.x * 0.35);
+  color += meniscus * WaterScatteringAndIntensity.xyz * 2.0;
+
+  return float4(color, 1.0);
+}

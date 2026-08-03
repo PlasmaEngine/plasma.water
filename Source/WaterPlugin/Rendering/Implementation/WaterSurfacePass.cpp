@@ -13,8 +13,8 @@
 #include <WaterPlugin/Rendering/WaterRenderData.h>
 #include <WaterPlugin/Rendering/WaterSurfacePass.h>
 
-#include <RendererCore/../../../Data/Base/Shaders/Water/WaterCausticFieldConstants.h>
-#include <RendererCore/../../../Data/Base/Shaders/Water/WaterCausticsConstants.h>
+#include <Shaders/Water/WaterCausticFieldConstants.h>
+#include <Shaders/Water/WaterCausticsConstants.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterSurfacePass, 1, plRTTIDefaultAllocator<plWaterSurfacePass>)

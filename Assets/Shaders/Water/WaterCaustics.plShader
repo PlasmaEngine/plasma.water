@@ -1,0 +1,335 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+CAMERA_MODE
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GBufferEncoding.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/Water/WaterCausticsConstants.h>
+#include <Shaders/Water/WaterWaveCommon.h>
+
+Texture2DArray WaterCausticSceneDepth;
+Texture2DArray WaterCausticGBuffer1;
+Texture2DArray WaterCausticShadow;
+Texture2DArray WaterCausticFieldHeight;
+Texture2DArray WaterCausticFieldData;
+RWTexture2DArray<float4> WaterCausticOutput;
+
+float2 WaterWorldToFieldUV(float2 worldXY)
+{
+  return (worldXY - WaterCausticFieldCenterAndExtent.xy) *
+           (0.5 * WaterCausticFieldCenterAndExtent.w) + 0.5;
+}
+
+bool LoadRasterizedWaterSurface(float2 worldXY, out float3 worldPosition, out float4 surfaceData)
+{
+  worldPosition = 0.0;
+  surfaceData = 0.0;
+  const float2 uv = WaterWorldToFieldUV(worldXY);
+  if (any(uv <= 0.001) || any(uv >= 0.999))
+    return false;
+
+  // Use a point sample only to classify coverage. Within a body, linear reconstruction prevents the
+  // world-space field texels from turning the focusing Jacobian into visible square blocks. Near a
+  // shoreline we retain the point values so the black clear color cannot pull height and oct-normal data
+  // across the water boundary and create a false bright fringe.
+  const float4 pointData = WaterCausticFieldData.SampleLevel(PointClampSampler, float3(uv, 0), 0);
+  const float pointStrength = max(pointData.z, pointData.w);
+  if (pointStrength <= 0.0)
+    return false;
+
+  const float4 linearData = WaterCausticFieldData.SampleLevel(LinearClampSampler, float3(uv, 0), 0);
+  const float linearSupport = max(linearData.z, linearData.w) / max(pointStrength, 1.0e-5);
+  const bool useLinearReconstruction = linearSupport >= 0.75;
+  surfaceData = useLinearReconstruction ? linearData : pointData;
+  const float height = useLinearReconstruction
+                         ? WaterCausticFieldHeight.SampleLevel(LinearClampSampler, float3(uv, 0), 0).r
+                         : WaterCausticFieldHeight.SampleLevel(PointClampSampler, float3(uv, 0), 0).r;
+  worldPosition = float3(worldXY, height);
+  return true;
+}
+
+bool LoadFallbackWaterSurface(float2 worldXY, out float3 worldPosition, out float4 surfaceData)
+{
+  worldPosition = 0.0;
+  surfaceData = 0.0;
+  if (WaterCausticFallbackCenterHeightValidity.w < 0.5 ||
+      any(worldXY < WaterCausticFallbackBounds.xy) || any(worldXY > WaterCausticFallbackBounds.zw))
+    return false;
+
+  // Finite fallback bounds are authored as a shoreline-safe square around the sampled point. Restrict
+  // them to the inscribed circle so irregular lakes and curved rivers cannot light their dry corners.
+  const float2 fallbackHalfExtent = 0.5 * (WaterCausticFallbackBounds.zw - WaterCausticFallbackBounds.xy);
+  const float fallbackRadius = min(fallbackHalfExtent.x, fallbackHalfExtent.y);
+  if (length(worldXY - WaterCausticFallbackCenterHeightValidity.xy) > fallbackRadius)
+    return false;
+
+  const float2 fieldUV = WaterWorldToFieldUV(worldXY);
+  if (any(fieldUV <= 0.0) || any(fieldUV >= 1.0))
+    return false;
+
+  float3 waveOffset;
+  float3 waveNormal;
+  float3 anchorOffset;
+  float3 anchorNormal;
+  EvaluateWaterGerstner(worldXY, WaterCausticFallbackWindTimeTexel.z,
+    WaterCausticFallbackWaveParams.x, WaterCausticFallbackWaveParams.y,
+    WaterCausticFallbackWaveParams.z, WaterCausticFallbackWaveParams.w,
+    WaterCausticFallbackWindTimeTexel.xy, waveOffset, waveNormal);
+  EvaluateWaterGerstner(WaterCausticFallbackCenterHeightValidity.xy, WaterCausticFallbackWindTimeTexel.z,
+    WaterCausticFallbackWaveParams.x, WaterCausticFallbackWaveParams.y,
+    WaterCausticFallbackWaveParams.z, WaterCausticFallbackWaveParams.w,
+    WaterCausticFallbackWindTimeTexel.xy, anchorOffset, anchorNormal);
+
+  const float height = WaterCausticFallbackCenterHeightValidity.z + waveOffset.z - anchorOffset.z;
+  worldPosition = float3(worldXY, height);
+  surfaceData = float4(EncodeNormalOctahedral(waveNormal), max(WaterCausticFallbackStrengths.xy, 0.0));
+  return surfaceData.z > 0.0 || surfaceData.w > 0.0;
+}
+
+bool LoadWaterSurface(float2 worldXY, out float3 worldPosition, out float4 surfaceData)
+{
+  if (LoadRasterizedWaterSurface(worldXY, worldPosition, surfaceData))
+    return true;
+  return LoadFallbackWaterSurface(worldXY, worldPosition, surfaceData);
+}
+
+float3 ReconstructReceiverNormal(float2 uv, uint eyeIndex, float3 worldPosition)
+{
+  if (WaterCausticFeatureParams.x > 0.5)
+    return DecodeNormalOctahedral(WaterCausticGBuffer1.SampleLevel(PointClampSampler, float3(uv, eyeIndex), 0).xy);
+
+  const float2 texel = WaterCausticTextureParams.xy;
+  const float depthX = WaterCausticSceneDepth.SampleLevel(PointClampSampler, float3(uv + float2(texel.x, 0.0), eyeIndex), 0).r;
+  const float depthY = WaterCausticSceneDepth.SampleLevel(PointClampSampler, float3(uv + float2(0.0, texel.y), eyeIndex), 0).r;
+  const float3 worldX = ScreenCoordToWorldSpace(uv + float2(texel.x, 0.0), depthX);
+  const float3 worldY = ScreenCoordToWorldSpace(uv + float2(0.0, texel.y), depthY);
+  const float3 unnormalized = cross(worldY - worldPosition, worldX - worldPosition);
+  return normalize(dot(unnormalized, unnormalized) > 1.0e-8 ? unnormalized : float3(0.0, 0.0, 1.0));
+}
+
+// Finds the wave surface in world space. Each coarse seed is projected directly onto the sampled height field,
+// then refined twice; this is both more stable and cheaper than projecting every step through the camera.
+bool FindWaterSurface(float3 receiverPosition, float3 searchDirection, uint stepCount,
+  bool hasInitialHint, float3 initialSurfacePosition, float4 initialSurfaceData,
+  out float3 surfacePosition, out float4 surfaceData)
+{
+  surfacePosition = 0.0;
+  surfaceData = 0.0;
+  if (abs(searchDirection.z) < 1.0e-4)
+    return false;
+
+  const float maxDistance = WaterCausticTraceParams.x;
+  stepCount = max(stepCount, 1u);
+  [loop]
+  for (uint seedIndex = 0u; seedIndex < stepCount; ++seedIndex)
+  {
+    const float normalizedSeed = stepCount > 1u ? float(seedIndex) / float(stepCount - 1u) : 0.0;
+    float distanceAlongRay = maxDistance * normalizedSeed * normalizedSeed;
+    float3 candidatePosition;
+    float4 candidateData;
+    if (seedIndex == 0u && hasInitialHint)
+    {
+      candidatePosition = initialSurfacePosition;
+      candidateData = initialSurfaceData;
+    }
+    else if (!LoadWaterSurface((receiverPosition + searchDirection * distanceAlongRay).xy, candidatePosition, candidateData))
+    {
+      continue;
+    }
+
+    [unroll]
+    for (uint refinement = 0u; refinement < 2u; ++refinement)
+    {
+      distanceAlongRay = (candidatePosition.z - receiverPosition.z) / searchDirection.z;
+      if (distanceAlongRay <= 0.0 || distanceAlongRay > maxDistance)
+        break;
+      if (!LoadWaterSurface((receiverPosition + searchDirection * distanceAlongRay).xy, candidatePosition, candidateData))
+        break;
+
+      const float refinedRayHeight = receiverPosition.z + searchDirection.z * distanceAlongRay;
+      const float convergenceTolerance = max(WaterCausticTraceParams.y, distanceAlongRay * 0.025);
+      if (abs(refinedRayHeight - candidatePosition.z) <= convergenceTolerance)
+        break;
+    }
+
+    if (distanceAlongRay <= 0.0 || distanceAlongRay > maxDistance)
+      continue;
+    const float3 rayPosition = receiverPosition + searchDirection * distanceAlongRay;
+    // candidatePosition.xy is sampled from rayPosition.xy by construction, so comparing the two XY values is
+    // tautological. The fixed-point iteration has converged only when the ray height agrees with the newly
+    // sampled surface height.
+    if (abs(rayPosition.z - candidatePosition.z) > max(WaterCausticTraceParams.y, distanceAlongRay * 0.025))
+      continue;
+
+    surfacePosition = candidatePosition;
+    surfaceData = candidateData;
+    return true;
+  }
+  return false;
+}
+
+float3 WaterPhotonDirection(float3 toLight, float3 surfaceNormal, bool reflected)
+{
+  const float3 incident = -toLight;
+  if (reflected)
+    return normalize(reflect(incident, surfaceNormal));
+
+  const float cosIncident = saturate(dot(surfaceNormal, toLight));
+  float cosTransmitted;
+  EvaluateWaterDielectricFresnel(cosIncident, 1.0, 1.333, cosTransmitted);
+  return EvaluateWaterRefractionDirection(incident, surfaceNormal, 1.0, 1.333, cosIncident, cosTransmitted);
+}
+
+bool ProjectPhotonToReceiverPlane(float3 surfacePosition, float3 photonDirection, float receiverHeight, out float2 targetXY)
+{
+  targetXY = 0.0;
+  if (abs(photonDirection.z) < 1.0e-4)
+    return false;
+  const float distance = (receiverHeight - surfacePosition.z) / photonDirection.z;
+  if (distance <= 0.0 || distance > WaterCausticTraceParams.x * 1.5)
+    return false;
+  targetXY = surfacePosition.xy + photonDirection.xy * distance;
+  return true;
+}
+
+float EvaluateWaterFocus(float3 surfacePosition, float3 centerPhotonDirection, float3 toLight,
+  float receiverHeight, bool reflected)
+{
+  const float fieldTexelSize = max(WaterCausticFallbackWindTimeTexel.w, 0.05);
+  float3 surfaceX;
+  float3 surfaceY;
+  float4 dataX;
+  float4 dataY;
+  if (!LoadWaterSurface(surfacePosition.xy + float2(fieldTexelSize, 0.0), surfaceX, dataX) ||
+      !LoadWaterSurface(surfacePosition.xy + float2(0.0, fieldTexelSize), surfaceY, dataY))
+    return 0.0;
+
+  const float3 normalX = DecodeNormalOctahedral(dataX.xy);
+  const float3 normalY = DecodeNormalOctahedral(dataY.xy);
+  float2 targetCenter;
+  float2 targetX;
+  float2 targetY;
+  if (!ProjectPhotonToReceiverPlane(surfacePosition, centerPhotonDirection, receiverHeight, targetCenter) ||
+      !ProjectPhotonToReceiverPlane(surfaceX, WaterPhotonDirection(toLight, normalX, reflected), receiverHeight, targetX) ||
+      !ProjectPhotonToReceiverPlane(surfaceY, WaterPhotonDirection(toLight, normalY, reflected), receiverHeight, targetY))
+    return 0.0;
+
+  const float2 inputX = surfaceX.xy - surfacePosition.xy;
+  const float2 inputY = surfaceY.xy - surfacePosition.xy;
+  const float2 outputX = targetX - targetCenter;
+  const float2 outputY = targetY - targetCenter;
+  const float inputArea = abs(inputX.x * inputY.y - inputX.y * inputY.x);
+  const float outputArea = abs(outputX.x * outputY.y - outputX.y * outputY.x);
+  if (inputArea < 1.0e-8)
+    return 0.0;
+
+  const float compression = min(inputArea / max(outputArea, inputArea * 0.08), 8.0);
+  // The receiver already contains the unfocused direct-light term, so this additive pass contributes only the
+  // excess irradiance created by area compression. Keeping that excess linear is energy-consistent; multiplying
+  // it by an additional smoothstep-like ramp would square weak focusing and erase broad caustics at normal exposure.
+  return min(max(compression - 1.0, 0.0), 4.0);
+}
+
+float3 TraceWaterCaustic(float2 uv, float3 receiverPosition, float3 receiverNormal, uint eyeIndex,
+  float3 toLight, bool reflected, uint stepCount, bool hasInitialHint,
+  float3 initialSurfacePosition, float4 initialSurfaceData)
+{
+  const float3 flatPhoton = WaterPhotonDirection(toLight, float3(0.0, 0.0, 1.0), reflected);
+  const float3 searchDirection = -flatPhoton;
+  float3 surfacePosition;
+  float4 surfaceData;
+  if (!FindWaterSurface(receiverPosition, searchDirection, stepCount, hasInitialHint,
+        initialSurfacePosition, initialSurfaceData, surfacePosition, surfaceData))
+    return 0.0;
+
+  const float sideDelta = surfacePosition.z - receiverPosition.z;
+  if ((!reflected && sideDelta <= 0.02) || (reflected && sideDelta >= -0.02))
+    return 0.0;
+
+  const float strength = reflected ? surfaceData.w : surfaceData.z;
+  if (strength <= 0.0)
+    return 0.0;
+
+  const float3 surfaceNormal = DecodeNormalOctahedral(surfaceData.xy);
+  const float lightNoN = dot(surfaceNormal, toLight);
+  // A facet facing away from the source receives no incident radiance and therefore cannot emit either lobe.
+  if (lightNoN <= 0.0)
+    return 0.0;
+
+  const float3 photonDirection = WaterPhotonDirection(toLight, surfaceNormal, reflected);
+  float2 photonTarget;
+  if (!ProjectPhotonToReceiverPlane(surfacePosition, photonDirection, receiverPosition.z, photonTarget))
+    return 0.0;
+
+  const float travelDistance = length(receiverPosition - surfacePosition);
+  const float footprint = max(WaterCausticTraceParams.y, travelDistance * 0.035);
+  const float targetError = length(photonTarget - receiverPosition.xy);
+  const float pathVisibility = exp2(-targetError * targetError / max(footprint * footprint, 1.0e-4));
+  if (pathVisibility < 0.005)
+    return 0.0;
+
+  const float receiverFacing = saturate(dot(receiverNormal, -photonDirection));
+  float cosTransmitted;
+  const float fresnel = EvaluateWaterDielectricFresnel(lightNoN, 1.0, 1.333, cosTransmitted);
+  const float lobeEnergy = reflected ? fresnel : (1.0 - fresnel);
+  const float focus = EvaluateWaterFocus(surfacePosition, photonDirection, toLight, receiverPosition.z, reflected);
+  const float distanceFade = exp(-travelDistance * (reflected ? 0.10 : 0.055));
+  // A receiver-side direct-light shadow is useful for the transmitted path. It is invalid for the
+  // reflected path: an underside is shadowed from the sun by definition, while sunlight can still
+  // bounce from the water onto it.
+  const float shadow = !reflected && WaterCausticFeatureParams.y > 0.5
+                         ? WaterCausticShadow.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).r
+                         : 1.0;
+  const float reflectionVisibilityScale = reflected ? 3.0 : 1.0;
+  const float intensity = focus * strength * lightNoN * lobeEnergy * receiverFacing * pathVisibility * distanceFade *
+                          saturate(shadow) * reflectionVisibilityScale * WaterCausticLightColorAndScale.w;
+  return WaterCausticLightColorAndScale.rgb * intensity;
+}
+
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+  if (dispatchThreadID.x >= WaterCausticDispatchParams.x || dispatchThreadID.y >= WaterCausticDispatchParams.y ||
+      dispatchThreadID.z >= WaterCausticDispatchParams.z)
+    return;
+
+  s_ActiveCameraEyeIndex = dispatchThreadID.z;
+  const uint eyeIndex = dispatchThreadID.z;
+  const float2 uv = (float2(dispatchThreadID.xy) + 0.5) * WaterCausticTextureParams.zw;
+  const float rawDepth = WaterCausticSceneDepth.SampleLevel(PointClampSampler, float3(uv, eyeIndex), 0).r;
+  const float linearDepth = LinearizeZBufferDepth(rawDepth);
+  if (WaterCausticLightDirectionAndValidity.w < 0.5 || WaterCausticTraceParams.z < 0.5 || linearDepth >= ClipPlanes.y * 0.999)
+  {
+    WaterCausticOutput[dispatchThreadID] = float4(0.0, 0.0, 0.0, linearDepth);
+    return;
+  }
+
+  const float3 receiverPosition = ScreenCoordToWorldSpace(uv, rawDepth);
+  const float3 receiverNormal = ReconstructReceiverNormal(uv, eyeIndex, receiverPosition);
+  const float3 toLight = normalize(WaterCausticLightDirectionAndValidity.xyz);
+  const uint stepsPerLobe = max(WaterCausticDispatchParams.w, 1u);
+
+  // Classify the receiver against the local surface once before either lobe performs its multi-step search.
+  // Near the water line both lobes stay eligible to avoid discontinuities across steep or displaced waves.
+  float3 localSurfacePosition;
+  float4 localSurfaceData;
+  const bool hasSideHint = LoadWaterSurface(receiverPosition.xy, localSurfacePosition, localSurfaceData);
+  const float sideHint = hasSideHint ? receiverPosition.z - localSurfacePosition.z : 0.0;
+  const float sideTolerance = max(WaterCausticTraceParams.y, 0.05);
+  const bool canReceiveTransmitted = !hasSideHint || sideHint <= sideTolerance;
+  const bool canReceiveReflected = !hasSideHint || sideHint >= -sideTolerance;
+
+  float3 lighting = 0.0;
+  if (WaterCausticFeatureParams.z > 0.5 && canReceiveTransmitted)
+    lighting += TraceWaterCaustic(uv, receiverPosition, receiverNormal, eyeIndex, toLight, false, stepsPerLobe,
+      hasSideHint, localSurfacePosition, localSurfaceData);
+  if (WaterCausticFeatureParams.w > 0.5 && canReceiveReflected)
+    lighting += TraceWaterCaustic(uv, receiverPosition, receiverNormal, eyeIndex, toLight, true, stepsPerLobe,
+      hasSideHint, localSurfacePosition, localSurfaceData);
+  WaterCausticOutput[dispatchThreadID] = float4(max(lighting, 0.0), linearDepth);
+}

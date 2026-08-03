@@ -15,8 +15,8 @@
 #include <WaterPlugin/Rendering/WaterGpuSimulation.h>
 #include <WaterPlugin/Rendering/WaterRenderData.h>
 
-#include <RendererCore/../../../Data/Base/Shaders/Water/WaterSimulationConstants.h>
-#include <RendererCore/../../../Data/Base/Shaders/Water/WaterSimulationStepConstants.h>
+#include <Shaders/Water/WaterSimulationConstants.h>
+#include <Shaders/Water/WaterSimulationStepConstants.h>
 
 #include <Foundation/Configuration/CVar.h>
 

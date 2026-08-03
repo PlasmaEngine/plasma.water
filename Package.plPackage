@@ -12,7 +12,7 @@ PackageInfo
 	// Version starts at 1.0.0 rather than inheriting an engine version: this package
 	// versions on its own changes from now on, not on the engine's.
 	string %Id{"plasma.water"}
-	string %Version{"1.1.0"}
+	string %Version{"1.1.1"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
@@ -33,7 +33,7 @@ PackageInfo
 	string %Category{"Rendering"}
 	string %Description{"Profile-driven oceans, rivers and lakes, with junctions, wave interaction, buoyancy hooks and underwater rendering.
 
-The water shaders and the default Ocean/River/Lake profiles ship with the engine rather than with this package, so installing it needs nothing further."}
+The water shaders and the default Ocean/River/Lake profiles ship inside this package and are mounted when it is installed, so it needs nothing else present to work."}
 	string %Icon{"Branding/WaterIcon.png"}
 	string %Banner{"Branding/WaterBanner.png"}
 
@@ -54,10 +54,17 @@ The water shaders and the default Ocean/River/Lake profiles ship with the engine
 	// "plWaterBodyComponent") - and includes no water header, so it needs this
 	// package present at run time but does not link against it.
 
+	// ---- assets ---------------------------------------------------------------
+	// Mounted as a data directory under this root name, so the shaders and the default profiles are
+	// reachable exactly as they were when they shipped inside the engine: the layout below Assets/
+	// mirrors the old one, which is why no material, shader include or asset reference had to change.
+	Mount { string %Path{"Assets"} string %RootName{"plasma.water"} bool %Writable{false} }
+
 	// ---- components -----------------------------------------------------------
 	Component { string %Name{"manifest"} string %Platform{"any"} }
 	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
 	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
+	Component { string %Name{"assets"} string %Platform{"any"} }
 	Component { string %Name{"icon"} string %Platform{"any"} }
 	Component { string %Name{"banner"} string %Platform{"any"} }
 }

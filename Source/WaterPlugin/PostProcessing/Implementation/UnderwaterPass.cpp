@@ -13,7 +13,7 @@
 #include <RendererFoundation/Resources/Texture.h>
 #include <WaterPlugin/Rendering/WaterFrameData.h>
 
-#include <RendererCore/../../../Data/Base/Shaders/Pipeline/UnderwaterConstants.h>
+#include <Shaders/Pipeline/UnderwaterConstants.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plUnderwaterPass, 2, plRTTIDefaultAllocator<plUnderwaterPass>)

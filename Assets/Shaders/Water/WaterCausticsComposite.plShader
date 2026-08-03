@@ -1,0 +1,75 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+CAMERA_MODE
+
+[RENDERSTATE]
+DepthTest = false
+DepthWrite = false
+CullMode = CullMode_None
+BlendingEnabled0 = true
+BlendOp0 = BlendOp_Add
+DestBlend0 = Blend_One
+SourceBlend0 = Blend_One
+DestBlendAlpha0 = Blend_One
+SourceBlendAlpha0 = Blend_Zero
+
+[VERTEXSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleVertexShader.h>
+
+[PIXELSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleInterpolator.h>
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/Water/WaterCausticsConstants.h>
+
+Texture2DArray WaterCausticLighting;
+Texture2DArray WaterCausticResolvedDepth;
+
+float4 main(PS_IN input) : SV_Target0
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = input.RenderTargetArrayIndex;
+#endif
+  const uint eyeIndex = s_ActiveCameraEyeIndex;
+  const float2 uv = input.TexCoord0.xy;
+  const float sceneDepth = LinearizeZBufferDepth(WaterCausticResolvedDepth.SampleLevel(PointClampSampler, float3(uv, eyeIndex), 0).r);
+  const float depthTolerance = max(0.15, sceneDepth * 0.015);
+
+  // Four point taps preserve each low-resolution sample's receiver depth. Bilinear-filtering RGBA first mixes
+  // foreground and background depths, which either halos across silhouettes or rejects valid caustic energy.
+  const float2 samplePosition = uv / WaterCausticTextureParams.zw - 0.5;
+  const float2 basePosition = floor(samplePosition);
+  const float2 fraction = samplePosition - basePosition;
+  const float2 bilinearWeights[4] =
+  {
+    float2((1.0 - fraction.x) * (1.0 - fraction.y), 0.0),
+    float2(fraction.x * (1.0 - fraction.y), 0.0),
+    float2((1.0 - fraction.x) * fraction.y, 0.0),
+    float2(fraction.x * fraction.y, 0.0),
+  };
+  const float2 offsets[4] =
+  {
+    float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0),
+  };
+
+  float3 accumulatedLighting = 0.0;
+  float accumulatedWeight = 0.0;
+  [unroll]
+  for (uint tap = 0u; tap < 4u; ++tap)
+  {
+    const float2 tapUV = (basePosition + offsets[tap] + 0.5) * WaterCausticTextureParams.zw;
+    const float4 caustic = WaterCausticLighting.SampleLevel(PointClampSampler, float3(tapUV, eyeIndex), 0);
+    const float depthAgreement = saturate(1.0 - abs(caustic.a - sceneDepth) / depthTolerance);
+    const float depthWeight = depthAgreement * depthAgreement;
+    const float weight = bilinearWeights[tap].x * depthWeight;
+    accumulatedLighting += caustic.rgb * weight;
+    accumulatedWeight += weight;
+  }
+
+  const float support = smoothstep(0.04, 0.2, accumulatedWeight);
+  return float4(accumulatedLighting / max(accumulatedWeight, 1.0e-4) * support, 0.0);
+}

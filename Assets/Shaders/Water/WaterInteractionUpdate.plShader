@@ -1,0 +1,94 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Water/WaterSimulationConstants.h>
+#include <Shaders/Water/WaterSimulationStepConstants.h>
+
+StructuredBuffer<plWaterGpuInteraction> WaterInteractionEvents;
+// Each tile owns one uint4 header (x = count) followed by packed event indices. The CPU builds this bounded
+// spatial index from the visible annuli every frame, avoiding an atlas-wide scan of every live interaction.
+StructuredBuffer<uint4> WaterInteractionTileEvents;
+RWTexture2DArray<float4> WaterInteractionOutput;
+
+// The atlas is NOT an integrated wave field: it is redrawn every dispatch as a pure function of the live event
+// list (wave particles). Each event is one analytic ring that grows at the propagation speed and weakens with
+// age. A 2D wave-equation integrator was tried first and cannot produce clean rings: 2D fronts leave a filled
+// interior tail (Huygens violation) and any net-volume source grows an unbounded logarithmic height dish.
+// Stateless evaluation has no feedback, so nothing can saturate, destabilize, or fail to decay.
+[numthreads(WATER_SIMULATION_THREAD_GROUP_SIZE, WATER_SIMULATION_THREAD_GROUP_SIZE, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint2 pixel = dispatchThreadId.xy;
+  const uint4 simulationStep = GET_PUSH_CONSTANT(plWaterSimulationStepConstants, WaterSimStep);
+  const uint2 atlasSize = simulationStep.yz;
+  if (pixel.x >= atlasSize.x || pixel.y >= atlasSize.y)
+    return;
+
+  const uint totalEventCount = simulationStep.x;
+  // timing: x = total time (unused, ages are per-event), y = growth speed, z = lifetime, w = per-tile cap
+  const float4 timing = GET_PUSH_CONSTANT(plWaterSimulationStepConstants, WaterSimTiming);
+
+  const float2 uv = (float2(pixel) + 0.5) / float2(atlasSize);
+
+  float height = 0.0;
+  float2 slope = 0.0;
+
+  const uint tileCount = max(simulationStep.w, 1u);
+  const uint2 tile = min(pixel * tileCount / atlasSize, uint2(tileCount - 1u, tileCount - 1u));
+  const uint tileRecordBase = (tile.y * tileCount + tile.x) * WATER_INTERACTION_TILE_RECORDS;
+  const uint eventCount = min(min(WaterInteractionTileEvents[tileRecordBase].x, (uint)timing.w), totalEventCount);
+
+  [loop]
+  for (uint tileEvent = 0u; tileEvent < eventCount; ++tileEvent)
+  {
+    const uint4 packedEventIndices = WaterInteractionTileEvents[tileRecordBase + 1u + tileEvent / 4u];
+    const uint i = packedEventIndices[tileEvent & 3u];
+    if (i >= totalEventCount)
+      continue;
+
+    const plWaterGpuInteraction interaction = WaterInteractionEvents[i];
+    // Toroidal shortest delta (the atlas wraps world space with a 100 m period), so rings stay round across
+    // the wrap seam instead of clipping.
+    const float2 eventUV = frac(interaction.PositionRadius.xy * 0.01 + 0.5);
+    float2 delta = uv - eventUV;
+    delta -= round(delta);
+    const float r = length(delta) * 100.0; // meters
+
+    const float age = asfloat(interaction.InteractionParams.z);
+    const bool isSplash = interaction.InteractionParams.y == 0u;
+    const float lifetime = isSplash ? timing.z : timing.z * 0.4;
+    if (age < 0.0 || age > lifetime)
+      continue;
+
+    const float contactRadius = max(interaction.PositionRadius.w, 0.1);
+    const float ringRadius = contactRadius + timing.y * age;                       // grows at the propagation speed
+    const float ringWidth = max(contactRadius * 0.5, 200.0 / float(atlasSize.x)); // >= 2 texels
+    const float x = (r - ringRadius) / ringWidth;
+    if (abs(x) > 4.0)
+      continue; // conservative CPU tile overlap can include pixels just outside the annulus
+
+    // Derivative-of-gaussian annulus (crest + trough, zero net volume). Amplitude fades exponentially with age
+    // AND with cylindrical spreading as the ring grows; the 0.05 base maps a strength-1 gain-3 splash to a
+    // ~0.15 m crest.
+    const float tau = lifetime / 3.0;
+    const float amplitude = interaction.DirectionStrength.w * 0.05 * exp(-age / tau) / sqrt(1.0 + timing.y * age / contactRadius);
+    const float gauss = exp(-x * x);
+    // Normalize the derivative-of-Gaussian wavelet so `amplitude` is its crest height (the unnormalized
+    // |x * exp(-x^2)| peaks at about 0.429). This keeps the authored impulse gain physically meaningful.
+    const float ringNormalization = 2.331644;
+    height += amplitude * (-x * gauss) * ringNormalization;
+
+    // Analytic radial slope, stored in the resolution-independent 'height per 512-atlas-texel' convention the
+    // surface shading factors were tuned against.
+    const float dhdr = amplitude * ((2.0 * x * x - 1.0) * gauss) * ringNormalization / ringWidth;
+    const float2 radialDir = r > 1e-4 ? normalize(delta) : float2(0.0, 0.0);
+    slope += radialDir * (dhdr * (100.0 / 512.0));
+  }
+
+  WaterInteractionOutput[uint3(pixel, 0)] = float4(height, 0.0, slope);
+}
