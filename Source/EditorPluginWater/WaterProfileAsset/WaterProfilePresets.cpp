@@ -7,6 +7,7 @@
 #include <Foundation/IO/OSFile.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
 #include <Foundation/Serialization/ReflectionSerializer.h>
+#include <Foundation/Strings/PathUtils.h>
 #include <ToolsFoundation/Project/ToolsProject.h>
 
 /// Serialized wrapper so a project preset file carries its display metadata alongside the descriptor.
@@ -265,12 +266,13 @@ plResult plWaterProfilePresetLibrary::SaveProjectPreset(plStringView sName, plWa
   if (GetProjectPresetDirectory(sDirectory).Failed())
     return PL_FAILURE;
 
-  plStringBuilder sFileName = sName;
-  // Keep the file name portable: the display name lives inside the file.
-  sFileName.ReplaceAll(" ", "_");
-  sFileName.ReplaceAll("/", "_");
-  sFileName.ReplaceAll("\\", "_");
-  sFileName.ReplaceAll(":", "_");
+  // Keep the file name portable: the display name lives inside the file. Spaces and the characters a file name cannot
+  // contain become '_'.
+  plStringBuilder sSpacesReplaced = sName;
+  sSpacesReplaced.ReplaceAll(" ", "_");
+
+  plStringBuilder sFileName;
+  plPathUtils::MakeValidFilename(sSpacesReplaced, '_', sFileName);
 
   plStringBuilder sFilePath = sDirectory;
   sFilePath.AppendPath(sFileName);

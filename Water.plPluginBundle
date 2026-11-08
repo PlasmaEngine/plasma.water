@@ -5,10 +5,10 @@
 {
 	string %DisplayName{"Water"}
 	string %Category{"Rendering"}
-	string %MinEngineVersion{"0.7.0"}
-	string %MaxEngineVersion{"0.7.0"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
 	// Drawn for the package - the bundle carried no artwork. Motif and palette match
-	// EditorPluginWater/QtResources/Water.svg.
+	// EditorIcons/WaterPlugin/Water.svg.
 	string %Icon{"WaterIcon.png"}
 	string %Banner{"WaterBanner.png"}
 	string %Description{"Profile-driven oceans, rivers, lakes, junctions, interaction, buoyancy hooks and underwater rendering."}

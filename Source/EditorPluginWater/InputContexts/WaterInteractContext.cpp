@@ -2,11 +2,10 @@
 
 #include <EditorPluginWater/InputContexts/WaterInteractContext.h>
 
-#include <EditorFramework/DocumentWindow/EngineViewWidget.moc.h>
+#include <EditorFramework/DocumentWindow/EngineViewWidget.h>
+#include <EditorFramework/InputContexts/EditorInputEvent.h>
 
-#include <QMouseEvent>
-
-plWaterInteractContext::plWaterInteractContext(plQtEngineDocumentWindow* pOwnerWindow, plQtEngineViewWidget* pOwnerView)
+plWaterInteractContext::plWaterInteractContext(plEngineDocumentWindow* pOwnerWindow, plEngineViewWidget* pOwnerView)
 {
   SetOwner(pOwnerWindow, pOwnerView);
 }
@@ -20,12 +19,7 @@ void plWaterInteractContext::SetEnabled(bool bEnabled)
   m_bDragging = false;
 
   if (GetOwnerView() != nullptr)
-  {
-    if (m_bEnabled)
-      GetOwnerView()->setCursor(Qt::CrossCursor);
-    else
-      GetOwnerView()->unsetCursor();
-  }
+    GetOwnerView()->SetViewCursor(m_bEnabled ? plEditorPlatformCursor::Cross : plEditorPlatformCursor::Arrow);
 
   if (!m_bEnabled && IsActiveInputContext())
     MakeActiveInputContext(false);
@@ -38,9 +32,9 @@ void plWaterInteractContext::DoFocusLost(bool bCancel)
     MakeActiveInputContext(false);
 }
 
-plEditorInput plWaterInteractContext::DoMousePressEvent(QMouseEvent* e)
+plEditorInput plWaterInteractContext::DoMousePressEvent(const plEditorInputEvent& e)
 {
-  if (!m_bEnabled || e->button() != Qt::LeftButton)
+  if (!m_bEnabled || e.m_uiButton != plEditorInputEvent::LeftButton)
     return plEditorInput::MayBeHandledByOthers;
 
   plVec3 vPosition;
@@ -55,7 +49,7 @@ plEditorInput plWaterInteractContext::DoMousePressEvent(QMouseEvent* e)
   return plEditorInput::WasExclusivelyHandled;
 }
 
-plEditorInput plWaterInteractContext::DoMouseMoveEvent(QMouseEvent* e)
+plEditorInput plWaterInteractContext::DoMouseMoveEvent(const plEditorInputEvent& e)
 {
   if (!m_bEnabled || !m_bDragging)
     return plEditorInput::MayBeHandledByOthers;
@@ -75,9 +69,9 @@ plEditorInput plWaterInteractContext::DoMouseMoveEvent(QMouseEvent* e)
   return plEditorInput::WasExclusivelyHandled;
 }
 
-plEditorInput plWaterInteractContext::DoMouseReleaseEvent(QMouseEvent* e)
+plEditorInput plWaterInteractContext::DoMouseReleaseEvent(const plEditorInputEvent& e)
 {
-  if (!m_bDragging || e->button() != Qt::LeftButton)
+  if (!m_bDragging || e.m_uiButton != plEditorInputEvent::LeftButton)
     return plEditorInput::MayBeHandledByOthers;
 
   m_bDragging = false;
@@ -85,13 +79,13 @@ plEditorInput plWaterInteractContext::DoMouseReleaseEvent(QMouseEvent* e)
   return plEditorInput::WasExclusivelyHandled;
 }
 
-bool plWaterInteractContext::TryPickWaterPlane(QMouseEvent* e, plVec3& out_vPosition) const
+bool plWaterInteractContext::TryPickWaterPlane(const plEditorInputEvent& e, plVec3& out_vPosition) const
 {
   if (GetOwnerView() == nullptr || !m_SendInteraction.IsValid())
     return false;
 
   const plPlane waterPlane = plPlane::MakeFromNormalAndPoint(plVec3(0, 0, 1), plVec3::MakeZero());
   return GetOwnerView()
-    ->PickPlane(static_cast<plUInt16>(plMath::Max(e->pos().x(), 0)), static_cast<plUInt16>(plMath::Max(e->pos().y(), 0)), waterPlane, out_vPosition)
+    ->PickPlane(static_cast<plUInt16>(plMath::Max(e.m_vPosition.x, 0.0f)), static_cast<plUInt16>(plMath::Max(e.m_vPosition.y, 0.0f)), waterPlane, out_vPosition)
     .Succeeded();
 }

@@ -12,7 +12,7 @@
 #include <Foundation/Utilities/ConversionUtils.h>
 #include <GameEngine/Configuration/RendererProfileConfigs.h>
 #include <GuiFoundation/Action/ActionMapManager.h>
-#include <GuiFoundation/UIServices/UIServices.moc.h>
+#include <GuiFoundation/UIServices/UIServices.h>
 #include <ToolsFoundation/Object/ObjectAccessorBase.h>
 #include <ToolsFoundation/Selection/SelectionManager.h>
 
@@ -182,13 +182,13 @@ namespace
   {
     if (plRTTI::FindTypeByName("plWaterBodyComponent") == nullptr)
     {
-      plQtUiServices::GetSingleton()->MessageBoxWarning("The Water runtime plugin is not loaded, so water components cannot be created.");
+      plEditorUiServices::MessageBoxWarning("The Water runtime plugin is not loaded, so water components cannot be created.");
       return false;
     }
     if (bNeedsSpline && (plRTTI::FindTypeByName("plSplineComponent") == nullptr || plRTTI::FindTypeByName("plSplineNodeComponent") == nullptr ||
                            plRTTI::FindTypeByName("plWaterSplinePointComponent") == nullptr))
     {
-      plQtUiServices::GetSingleton()->MessageBoxWarning("The Water spline authoring types are not loaded.");
+      plEditorUiServices::MessageBoxWarning("The Water spline authoring types are not loaded.");
       return false;
     }
     return true;
@@ -308,7 +308,7 @@ namespace
     GatherSelectedWaterBodies(pDocument, bodies);
     if (bodies.GetCount() != 2)
     {
-      plQtUiServices::GetSingleton()->MessageBoxInformation("Select exactly two water bodies before creating a junction.");
+      plEditorUiServices::MessageBoxInformation("Select exactly two water bodies before creating a junction.");
       return;
     }
 
@@ -463,7 +463,7 @@ namespace
     GatherSelectedComponents(pDocument, "plWaterJunctionComponent", junctions);
     if (junctions.IsEmpty())
     {
-      plQtUiServices::GetSingleton()->MessageBoxInformation("Select one or more water junctions to re-snap.");
+      plEditorUiServices::MessageBoxInformation("Select one or more water junctions to re-snap.");
       return;
     }
 
@@ -533,7 +533,7 @@ namespace
     GatherSelectedWaterBodies(pDocument, bodies);
     if (bodies.IsEmpty())
     {
-      plQtUiServices::GetSingleton()->MessageBoxInformation("Select one or more rivers to repair their node metadata.");
+      plEditorUiServices::MessageBoxInformation("Select one or more rivers to repair their node metadata.");
       return;
     }
 
@@ -595,7 +595,7 @@ namespace
     GatherSelectedComponents(pDocument, "plOceanComponent", legacyComponents);
     if (legacyComponents.IsEmpty())
     {
-      plQtUiServices::GetSingleton()->MessageBoxInformation("Select one or more legacy plOceanComponent objects to convert.");
+      plEditorUiServices::MessageBoxInformation("Select one or more legacy plOceanComponent objects to convert.");
       return;
     }
 
@@ -661,9 +661,9 @@ namespace
     plStringBuilder sReport;
     plWaterEditorValidation::BuildReport(issues, sReport);
     if (issues.IsEmpty())
-      plQtUiServices::GetSingleton()->MessageBoxInformation(sReport);
+      plEditorUiServices::MessageBoxInformation(sReport);
     else
-      plQtUiServices::GetSingleton()->MessageBoxWarning(sReport);
+      plEditorUiServices::MessageBoxWarning(sReport);
 
     pDocument->ShowDocumentStatus(sReport.GetView());
   }
@@ -673,21 +673,21 @@ namespace
     const plPlatformProfile* pProfile = plAssetCurator::GetSingleton()->GetActiveAssetProfile();
     if (pProfile == nullptr)
     {
-      plQtUiServices::GetSingleton()->MessageBoxWarning("There is no active asset profile to inspect.");
+      plEditorUiServices::MessageBoxWarning("There is no active asset profile to inspect.");
       return;
     }
 
     const plRenderPipelineProfileConfig* pPipelineConfig = pProfile->GetTypeConfig<plRenderPipelineProfileConfig>();
     if (pPipelineConfig == nullptr || pPipelineConfig->m_sMainRenderPipeline.IsEmpty())
     {
-      plQtUiServices::GetSingleton()->MessageBoxWarning("The active asset profile has no main render pipeline assigned. No changes were made.");
+      plEditorUiServices::MessageBoxWarning("The active asset profile has no main render pipeline assigned. No changes were made.");
       return;
     }
 
     auto pipelineAsset = plAssetCurator::GetSingleton()->FindSubAsset(pPipelineConfig->m_sMainRenderPipeline);
     if (!pipelineAsset.isValid() || pipelineAsset->m_pAssetInfo == nullptr)
     {
-      plQtUiServices::GetSingleton()->MessageBoxWarning("The active main render pipeline asset could not be resolved. No changes were made.");
+      plEditorUiServices::MessageBoxWarning("The active main render pipeline asset could not be resolved. No changes were made.");
       return;
     }
 
@@ -695,7 +695,7 @@ namespace
     plFileReader reader;
     if (reader.Open(sPipelinePath).Failed())
     {
-      plQtUiServices::GetSingleton()->MessageBoxWarning(plFmt("Could not read render pipeline '{}'. No changes were made.", sPipelinePath));
+      plEditorUiServices::MessageBoxWarning(plFmt("Could not read render pipeline '{}'. No changes were made.", sPipelinePath));
       return;
     }
 
@@ -706,7 +706,7 @@ namespace
 
     if (bHasSurface && bHasUnderwater)
     {
-      plQtUiServices::GetSingleton()->MessageBoxInformation(
+      plEditorUiServices::MessageBoxInformation(
         plFmt("Water pipeline inspection passed for '{}'. Water surface and underwater composition passes are present. No changes were needed.", sPipelinePath));
       return;
     }
@@ -721,11 +721,11 @@ namespace
       sMissing.Append("plWaterUnderwaterPass");
     }
 
-    plQtUiServices::GetSingleton()->MessageBoxWarning(plFmt(
+    plEditorUiServices::MessageBoxWarning(plFmt(
       "The active pipeline is missing {} or uses an unrecognized custom topology. The conservative assistant did not duplicate, edit, transform, or save the asset. "
       "The pipeline will be opened so the connections can be reviewed explicitly.",
       sMissing));
-    plQtEditorApp::GetSingleton()->OpenDocumentQueued(sPipelinePath);
+    plEditorApp::GetSingleton()->OpenDocumentQueued(sPipelinePath);
 
     if (pDocument != nullptr)
       pDocument->ShowDocumentStatus("Water pipeline requires manual review; no asset changes were made.");

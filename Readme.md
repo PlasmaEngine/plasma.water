@@ -15,7 +15,8 @@ Water.plPluginBundle    legacy descriptor, kept until the engine reads manifests
 Source/
   WaterPlugin/          runtime               -> plWaterPlugin
   EnginePluginWater/    editor engine process -> plEnginePluginWater
-  EditorPluginWater/    editor                -> plEditorPluginWater  (Qt: profile editor, actions)
+  EditorPluginWater/    editor                -> plEditorPluginWater  (profile editor, actions)
+EditorIcons/            editor icons, registered as an icon folder by the editor plugin
 Configs/                build rules for building against an installed engine SDK
 Branding/               icon and banner
 ```
@@ -55,7 +56,7 @@ Output lands in `Bin/Windows_x64_Development/`.
 ## Artwork
 
 The bundle shipped with `Icon{""}` and `Banner{""}`, so both were drawn for the package. The motif
-and palette come from `Source/EditorPluginWater/QtResources/Water.svg`, which is what the component
+and palette come from `EditorIcons/WaterPlugin/Water.svg`, which is what the component
 icons already use, so the package art and the in-editor iconography agree. They are generated, not
 hand-painted — regenerate them by rerunning the renderer if the palette ever changes.
 

@@ -2,9 +2,7 @@
 
 #include <EditorPluginWater/WaterProfileAsset/WaterProfileAsset.h>
 #include <EditorPluginWater/WaterProfileAsset/WaterProfileAssetManager.h>
-#include <EditorPluginWater/WaterProfileAsset/WaterProfileAssetWindow.moc.h>
-
-#include <GuiFoundation/UIServices/ImageCache.moc.h>
+#include <EditorPluginWater/WaterProfileAsset/WaterProfileAssetWindow.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterProfileAssetDocumentManager, 1, plRTTIDefaultAllocator<plWaterProfileAssetDocumentManager>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -22,8 +20,6 @@ plWaterProfileAssetDocumentManager::plWaterProfileAssetDocumentManager()
   m_DocTypeDesc.m_CompatibleTypes.PushBack("CompatibleAsset_WaterProfile");
   m_DocTypeDesc.m_sResourceFileExtension = "plBinWaterProfile";
   m_DocTypeDesc.m_AssetDocumentFlags = plAssetDocumentFlags::AutoTransformOnSave | plAssetDocumentFlags::SupportsThumbnail;
-
-  plQtImageCache::GetSingleton()->RegisterTypeImage("WaterProfile", QPixmap(":/AssetIcons/WaterProfile.svg"));
 }
 
 plWaterProfileAssetDocumentManager::~plWaterProfileAssetDocumentManager()
@@ -36,7 +32,7 @@ void plWaterProfileAssetDocumentManager::OnDocumentManagerEvent(const plDocument
   if (e.m_Type == plDocumentManager::Event::Type::DocumentWindowRequested &&
       e.m_pDocument->GetDynamicRTTI() == plGetStaticRTTI<plWaterProfileAssetDocument>())
   {
-    new plQtWaterProfileAssetDocumentWindow(e.m_pDocument); // NOLINT: owned by Qt
+    new plWaterProfileAssetDocumentWindow(e.m_pDocument); // NOLINT: the window deletes itself when it closes
   }
 }
 

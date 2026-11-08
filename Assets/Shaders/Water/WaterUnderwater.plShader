@@ -26,9 +26,11 @@ Texture2DArray WaterUnderwaterSceneColor;
 Texture2DArray WaterUnderwaterSceneDepth;
 Texture2DArray WaterUnderwaterExitDepth;
 
+// Scene color is pre-exposed; the underwater terms are absolute radiance, so the pass works in absolute radiance and
+// pre-exposes its result.
 float3 SampleUnderwaterScene(float2 uv, uint eyeIndex)
 {
-  return WaterUnderwaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb;
+  return WaterUnderwaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb / max(PreExposure, 1.0e-30);
 }
 
 float4 main(PS_IN input) : SV_Target0
@@ -40,7 +42,7 @@ float4 main(PS_IN input) : SV_Target0
   const float2 uv = input.TexCoord0.xy;
   const float waterTime = WaterEffectParams.w;
   if (WaterCameraParams.z < 0.5)
-    return float4(SampleUnderwaterScene(uv, eyeIndex), 1.0);
+    return float4(WaterUnderwaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb, 1.0);
 
   const float distortionScale = WaterEffectParams.x * saturate(WaterCameraParams.x * 0.25 + 0.25);
   const float2 distortion = float2(
@@ -87,5 +89,5 @@ float4 main(PS_IN input) : SV_Target0
   const float meniscus = pow(saturate(1.0 - uv.y), 24.0) * saturate(WaterProfileParams.z) * saturate(1.0 - WaterCameraParams.x * 0.35);
   color += meniscus * WaterScatteringAndIntensity.xyz * 2.0;
 
-  return float4(color, 1.0);
+  return float4(PreExpose(color), 1.0);
 }

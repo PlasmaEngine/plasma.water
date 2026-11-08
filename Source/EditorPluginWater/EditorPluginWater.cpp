@@ -4,19 +4,35 @@
 #include <EditorFramework/Actions/ProjectActions.h>
 #include <EditorPluginWater/Actions/WaterActions.h>
 #include <EditorPluginWater/Preferences/WaterEditorPreferences.h>
+#include <EditorPluginWater/WaterProfileAsset/WaterProfileShellPanels.h>
 #include <EditorPluginWater/WaterProfileAsset/WaterProfileUiServices.h>
-#include <EditorPluginWater/WaterProfileAsset/WaterPropertyWidgets.moc.h>
+#include <EditorUi/Widgets.h>
+#include <Foundation/Configuration/Plugin.h>
 #include <GuiFoundation/Action/ActionMapManager.h>
 #include <GuiFoundation/Action/CommandHistoryActions.h>
 #include <GuiFoundation/Action/DocumentActions.h>
 #include <GuiFoundation/Action/EditActions.h>
 #include <GuiFoundation/Action/StandardMenus.h>
-#include <GuiFoundation/PropertyGrid/PropertyGridWidget.moc.h>
 #include <GuiFoundation/PropertyGrid/PropertyMetaState.h>
 #include <WaterPlugin/Resources/WaterProfileResource.h>
 
 namespace
 {
+  plString s_sIconFolder;
+
+  /// The package's editor icons (":/AssetIcons/...", ":/TypeIcons/..." are files under EditorIcons): the plugin binary
+  /// sits in <package>/Bin/<config>, both in the source tree and in an installed copy.
+  plString GetIconFolder()
+  {
+    plStringBuilder sBinary, sCopy;
+    plPlugin::GetPluginPaths("plEditorPluginWater", sBinary, sCopy, 0);
+
+    plStringBuilder sFolder = sBinary.GetFileDirectory();
+    sFolder.PathParentDirectory(2);
+    sFolder.AppendPath("EditorIcons");
+    return sFolder;
+  }
+
   void ToolsProjectEventHandler(const plToolsProjectEvent& e)
   {
     // Project preferences require the project directory, which is not established
@@ -45,6 +61,9 @@ namespace
 
 PL_PLUGIN_ON_LOADED()
 {
+  s_sIconFolder = GetIconFolder();
+  plEditorUi::AddIconFolder(s_sIconFolder);
+
   plToolsProject::GetSingleton()->s_Events.AddEventHandler(ToolsProjectEventHandler);
   ConfigureWaterProfileAsset();
 
@@ -56,18 +75,20 @@ PL_PLUGIN_ON_LOADED()
   // Dim water profile properties the previewed body type ignores.
   plPropertyMetaState::GetSingleton()->m_Events.AddEventHandler(plWaterProfileUiServices::PropertyMetaStateEventHandler);
 
-  // Custom value widgets: wave seed reroll + wind direction compass dial.
-  plQtPropertyGridWidget::GetFactory().RegisterCreator(plGetStaticRTTI<plWaterSeedWidgetAttribute>(),
-    [](const plRTTI* pRtti) -> plQtPropertyWidget* { return new plQtWaterSeedPropertyWidget(); });
-  plQtPropertyGridWidget::GetFactory().RegisterCreator(plGetStaticRTTI<plWaterWindDirectionWidgetAttribute>(),
-    [](const plRTTI* pRtti) -> plQtPropertyWidget* { return new plQtWaterWindDirectionPropertyWidget(); });
+  // The wave seed reroll and the wind direction dial are built into the editor's property
+  // grid (plWaterSeedWidgetAttribute, plWaterWindDirectionWidgetAttribute).
+
+  // the Water Profile window's panels in the engine shell
+  plWaterProfileShellPanels::Register();
 }
 
 PL_PLUGIN_ON_UNLOADED()
 {
-  plQtPropertyGridWidget::GetFactory().UnregisterCreator(plGetStaticRTTI<plWaterSeedWidgetAttribute>());
-  plQtPropertyGridWidget::GetFactory().UnregisterCreator(plGetStaticRTTI<plWaterWindDirectionWidgetAttribute>());
+  plWaterProfileShellPanels::Unregister();
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plWaterProfileUiServices::PropertyMetaStateEventHandler);
   plWaterActions::UnregisterActions();
   plToolsProject::GetSingleton()->s_Events.RemoveEventHandler(ToolsProjectEventHandler);
+
+  plEditorUi::RemoveIconFolder(s_sIconFolder);
+  s_sIconFolder.Clear();
 }

@@ -287,7 +287,7 @@ VS_OUT main(WaterTessellationFactors factors, OutputPatch<VS_OUT, 3> patch,
 #include <Shaders/Materials/MaterialData.h>
 #include <Shaders/Materials/MaterialInterpolator.h>
 #include <Shaders/Common/Lighting.h>
-#include <Shaders/Materials/MaterialVXGIForwardLighting.h>
+#include <Shaders/Materials/MaterialGIForwardLighting.h>
 #include <Shaders/Water/WaterCausticFieldConstants.h>
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
@@ -519,7 +519,7 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
       // Do not let a depth discontinuity in front of this water pixel become an immediate false hit.
       const float receiverValidity = smoothstep(surfaceLinearDepth * 0.25, surfaceLinearDepth * 0.75, hitDepth);
       reflectionValidity = edgeValidity * depthValidity * roughnessValidity * grazingValidity * receiverValidity;
-      return WaterSceneColor.SampleLevel(LinearClampSampler, float3(hitUV, eyeIndex), 0).rgb;
+      return WaterSceneColor.SampleLevel(LinearClampSampler, float3(hitUV, eyeIndex), 0).rgb * SceneColorToAbsolute();
     }
 
     if (depthDelta < -depthThickness)
@@ -771,8 +771,10 @@ float4 main(PS_IN input) : SV_Target0
   const float foregroundReject = smoothstep(surfaceLinearDepth + 0.01, surfaceLinearDepth + max(0.1, thickness * 0.08), candidateOpaqueDepth);
   const float refractionValid = projectionValid * rayValid * transmissionValid * candidateInsideViewport * foregroundReject;
   const float2 refractionUV = lerp(uv, candidateRefractionUV, refractionValid);
-  const float3 undistortedSceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb;
-  const float3 sceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(refractionUV, eyeIndex), 0).rgb;
+  // Scene color is pre-exposed; water shades in absolute radiance and pre-exposes its result.
+  const float sceneColorToAbsolute = SceneColorToAbsolute();
+  const float3 undistortedSceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb * sceneColorToAbsolute;
+  const float3 sceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(refractionUV, eyeIndex), 0).rgb * sceneColorToAbsolute;
   const float incidentForward = max(dot(incidentDirection, cameraForward), 0.05);
   const float directPathLength = thickness / incidentForward;
   const float refractedPathLength = max(candidateOpaqueDepth - surfaceLinearDepth, 0.0) / max(refractedForward, 0.05);
@@ -864,8 +866,8 @@ float4 main(PS_IN input) : SV_Target0
   const float3 environmentBrdf = EnvironmentBRDF(materialData.specularColor, materialData.roughness, noV);
   // Water selects one indirect reflection source explicitly; clustered lighting above is direct-only.
   const float3 probeRadiance = ComputeReflection(materialData, viewDirection, clusterData, input.Position.xyw);
-  const float3 giSpecularRadiance = SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * VXGISpecularIntensity;
-  const float giSpecularValid = (VXGIForwardEnabled != 0 && VXGIForwardReflectionsEnabled != 0) ? 1.0 : 0.0;
+  const float3 giSpecularRadiance = SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * GISpecularStrength;
+  const float giSpecularValid = (GIForwardEnabled != 0 && GIForwardReflectionsEnabled != 0) ? 1.0 : 0.0;
   const float3 stableEnvironmentRadiance = lerp(probeRadiance, giSpecularRadiance, giSpecularValid);
   // Reflection parameters are energy weights. Clamping them prevents an authored multiplier from producing
   // more reflected radiance than arrives at the interface.
@@ -880,7 +882,7 @@ float4 main(PS_IN input) : SV_Target0
     ssrRadiance = TraceWaterScreenSpaceReflection(input.WorldPosition, reflectionDirection, surfaceLinearDepth,
       perceptualRoughness, noV, eyeIndex, ssrValidity);
 #endif
-  // A valid water-aware SSR hit replaces the stable probe / VXGI source before BRDF weighting. Reflection
+  // A valid water-aware SSR hit replaces the stable probe / GI source before BRDF weighting. Reflection
   // sources are selected, never accumulated, so a bright sky cannot be counted by multiple systems.
   const float3 resolvedEnvironmentRadiance = lerp(stableEnvironmentRadiance, ssrRadiance, ssrValidity);
   const float3 resolvedEnvironmentReflection = resolvedEnvironmentRadiance * environmentBrdf;
@@ -899,8 +901,7 @@ float4 main(PS_IN input) : SV_Target0
   const float3 directReflection = max(engineLighting.specularLight * reflectionStrength, analyticSunGlitter * glitterStrength);
   float3 reflectionLighting = directReflection + resolvedEnvironmentReflection * environmentReflectionWeight;
 
-  // AtmosphericScattering is a view background and intentionally does not populate reflection probe index zero.
-  // When a world has neither a SkyLight nor a reflection probe, the engine reflection result is therefore black.
+  // When a world has neither a SkyLight nor a reflection probe, the engine reflection result is black.
   // Preserve the physically authored water response by falling back to sky irradiance when available and finally to
   // the profile's own scattering tint when neither SSR nor the engine reflection source provides radiance.
   const float3 skyIrradiance = EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, reflectionDirection).rgb;
@@ -1063,39 +1064,25 @@ float4 main(PS_IN input) : SV_Target0
     return float4(0.65, 0.0, 0.0, 1.0); // Every displaced water draw is classified as dynamic render data.
   if (RenderPass == EDITOR_RENDER_PASS_BONE_WEIGHTS)
     return float4(0.05, 0.05, 0.1, 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_DIFFUSE)
-    return float4(SrgbToLinear(SampleGIForwardDiffuse(input.Position.xyw, input.WorldPosition) * VXGIDiffuseIntensity * Exposure), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_SPECULAR)
+  if (RenderPass == EDITOR_RENDER_PASS_GI_DIFFUSE)
+    return float4(SrgbToLinear(SampleGIForwardDiffuse(input.Position.xyw, input.WorldPosition) * GIDiffuseStrength * Exposure), 1.0);
+  if (RenderPass == EDITOR_RENDER_PASS_GI_SPECULAR)
   {
     const float3 giBrdf = EnvironmentBRDF(effectiveSpecularColor, effectiveRoughness, noV);
-    return float4(SrgbToLinear(SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * giBrdf * VXGISpecularIntensity * Exposure), 1.0);
+    return float4(SrgbToLinear(SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * giBrdf * GISpecularStrength * Exposure), 1.0);
   }
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_COMBINED)
+  if (RenderPass == EDITOR_RENDER_PASS_GI_COMBINED)
   {
     const float3 giBrdf = EnvironmentBRDF(effectiveSpecularColor, effectiveRoughness, noV);
-    const float3 giLighting = SampleGIForwardDiffuse(input.Position.xyw, input.WorldPosition) * VXGIDiffuseIntensity +
-                              SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * giBrdf * VXGISpecularIntensity;
+    const float3 giLighting = SampleGIForwardDiffuse(input.Position.xyw, input.WorldPosition) * GIDiffuseStrength +
+                              SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * giBrdf * GISpecularStrength;
     return float4(SrgbToLinear(giLighting * Exposure), 1.0);
   }
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_RADIANCE)
-    return float4(SrgbToLinear(SampleVXGIForwardRadiance(input.WorldPosition, normal) * Exposure), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_SDF)
-    return float4(SrgbToLinear(SampleVXGIForwardSDF(input.WorldPosition, normal)), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_CLIPMAP_COVERAGE)
-    return float4(SrgbToLinear(SampleVXGIForwardClipmapCoverage(input.WorldPosition)), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_CLIPMAP_INDEX)
-    return float4(SrgbToLinear(SampleVXGIForwardClipmapIndex(input.WorldPosition)), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_VOXEL_SCENE)
-    return float4(SrgbToLinear(SampleVXGIForwardRadiance(input.WorldPosition, normal) * max(Exposure, 1.0)), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_CLIPMAP_VOLUME)
-    return float4(SrgbToLinear(SampleVXGIForwardClipmapIndex(input.WorldPosition)), 1.0);
-  if (RenderPass == EDITOR_RENDER_PASS_VXGI_VOXEL_LIGHTING)
-    return float4(SrgbToLinear(SampleVXGIForwardRadiance(input.WorldPosition, normal) * Exposure), 1.0);
 
   return float4(1.0, 0.0, 1.0, 1.0);
 #endif
 
-  return float4(color, 1.0);
+  return float4(PreExpose(color), 1.0);
 }
 
 #endif

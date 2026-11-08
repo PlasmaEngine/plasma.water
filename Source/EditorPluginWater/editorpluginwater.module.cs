@@ -11,7 +11,8 @@ public class EditorPluginWaterModule : ModuleRules
         PlasmaPackageSdk.ConfigureEditorSdkConsumer(this, context);
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/WaterPlugin", "plWaterPlugin");
 
-        PlasmaPackageQt.ConfigureQtModule(this, context, "EditorPluginWaterModule",
-            "Source/EditorPluginWater", "Core", "Gui", "Widgets");
+        // The Water Profile docks are engine-drawn: EditorUi and the retained UI runtime.
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plEditorUi");
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plGameUiPlugin");
     }
 }

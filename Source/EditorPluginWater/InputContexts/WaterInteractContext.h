@@ -11,7 +11,7 @@
 class plWaterInteractContext : public plEditorInputContext
 {
 public:
-  plWaterInteractContext(plQtEngineDocumentWindow* pOwnerWindow, plQtEngineViewWidget* pOwnerView);
+  plWaterInteractContext(plEngineDocumentWindow* pOwnerWindow, plEngineViewWidget* pOwnerView);
 
   /// Callback receives the picked water-plane position and whether this is a continuous (drag) interaction.
   plDelegate<void(const plVec3&, bool)> m_SendInteraction;
@@ -20,15 +20,15 @@ public:
   bool IsEnabled() const { return m_bEnabled; }
 
 protected:
-  virtual void OnSetOwner(plQtEngineDocumentWindow* pOwnerWindow, plQtEngineViewWidget* pOwnerView) override {}
+  virtual void OnSetOwner(plEngineDocumentWindow* pOwnerWindow, plEngineViewWidget* pOwnerView) override {}
   virtual void DoFocusLost(bool bCancel) override;
 
-  virtual plEditorInput DoMousePressEvent(QMouseEvent* e) override;
-  virtual plEditorInput DoMouseMoveEvent(QMouseEvent* e) override;
-  virtual plEditorInput DoMouseReleaseEvent(QMouseEvent* e) override;
+  virtual plEditorInput DoMousePressEvent(const plEditorInputEvent& e) override;
+  virtual plEditorInput DoMouseMoveEvent(const plEditorInputEvent& e) override;
+  virtual plEditorInput DoMouseReleaseEvent(const plEditorInputEvent& e) override;
 
 private:
-  bool TryPickWaterPlane(QMouseEvent* e, plVec3& out_vPosition) const;
+  bool TryPickWaterPlane(const plEditorInputEvent& e, plVec3& out_vPosition) const;
 
   bool m_bEnabled = false;
   bool m_bDragging = false;

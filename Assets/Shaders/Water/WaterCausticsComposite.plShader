@@ -71,5 +71,5 @@ float4 main(PS_IN input) : SV_Target0
   }
 
   const float support = smoothstep(0.04, 0.2, accumulatedWeight);
-  return float4(accumulatedLighting / max(accumulatedWeight, 1.0e-4) * support, 0.0);
+  return float4(PreExpose(accumulatedLighting / max(accumulatedWeight, 1.0e-4) * support), 0.0);
 }
