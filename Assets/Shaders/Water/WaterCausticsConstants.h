@@ -11,7 +11,7 @@ CONSTANT_BUFFER(plWaterCausticsConstants, 5)
   FLOAT4(WaterCausticLightColorAndScale);
   // xy: inverse full-resolution size, zw: inverse caustic-resolution size.
   FLOAT4(WaterCausticTextureParams);
-  // x: maximum world-space search distance in meters, y: base hit tolerance, z: any source is valid, w: reserved.
+  // x: maximum world-space search distance in meters, y: base hit tolerance, z: any source is valid, w: contact shadow layers per eye (the sun is slot 0).
   FLOAT4(WaterCausticTraceParams);
   // xy: world-space field center, z: half extent, w: reciprocal half extent.
   FLOAT4(WaterCausticFieldCenterAndExtent);
@@ -25,7 +25,7 @@ CONSTANT_BUFFER(plWaterCausticsConstants, 5)
   FLOAT4(WaterCausticFallbackStrengths);
   // xy: wind direction, z: simulation time, w: world-space field texel size.
   FLOAT4(WaterCausticFallbackWindTimeTexel);
-  // x: GBuffer1 available, y: screen-space shadow available, z/w: transmitted/reflected enabled.
+  // x: GBuffer1 available, y: sun contact shadow available, z/w: transmitted/reflected enabled.
   FLOAT4(WaterCausticFeatureParams);
   // x/y: caustic output size, z: view-array size, w: ray-march step count.
   UINT4(WaterCausticDispatchParams);

@@ -283,7 +283,7 @@ float3 TraceWaterCaustic(float2 uv, float3 receiverPosition, float3 receiverNorm
   // reflected path: an underside is shadowed from the sun by definition, while sunlight can still
   // bounce from the water onto it.
   const float shadow = !reflected && WaterCausticFeatureParams.y > 0.5
-                         ? WaterCausticShadow.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).r
+                         ? WaterCausticShadow.SampleLevel(LinearClampSampler, float3(uv, eyeIndex * (uint)WaterCausticTraceParams.w), 0).r
                          : 1.0;
   const float reflectionVisibilityScale = reflected ? 3.0 : 1.0;
   const float intensity = focus * strength * lightNoN * lobeEnergy * receiverFacing * pathVisibility * distanceFade *

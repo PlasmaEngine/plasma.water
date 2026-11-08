@@ -1,7 +1,7 @@
 #include <WaterPlugin/WaterPluginPCH.h>
 
 #include <Foundation/IO/TypeVersionContext.h>
-#include <RendererCore/Lights/ScreenSpaceShadowDataProvider.h>
+#include <RendererCore/Lights/ContactShadowDataProvider.h>
 #include <RendererCore/Pipeline/RenderPipeline.h>
 #include <RendererCore/Pipeline/View.h>
 #include <RendererCore/RenderContext/BindGroupBuilder.h>
@@ -9,6 +9,7 @@
 #include <RendererCore/RenderGraph/RenderGraph.h>
 #include <RendererCore/RenderGraph/RenderGraphContext.h>
 #include <RendererCore/RenderGraph/RenderGraphPassBuilder.h>
+#include <RendererFoundation/Resources/Texture.h>
 #include <WaterPlugin/Rendering/WaterFrameData.h>
 #include <WaterPlugin/Rendering/WaterRenderData.h>
 #include <WaterPlugin/Rendering/WaterSurfacePass.h>
@@ -78,13 +79,17 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
   const plRenderGraphTextureHandle hDepthStencil = inputs[m_PinDepthStencil.m_uiInputIndex].m_TextureHandle;
   const plRenderGraphTextureHandle hResolvedDepth = inputs[m_PinResolvedDepth.m_uiInputIndex].m_TextureHandle;
   const plRenderGraphTextureHandle hGBuffer1 = inputs[m_PinGBuffer1.m_uiInputIndex].m_TextureHandle;
+  // The contact shadows pass publishes one result layer per traced light and eye. The sun, when it is traced, is
+  // always slot 0, so the caustics read layer eye * slots-per-eye.
   plRenderGraphTextureHandle hScreenSpaceShadow;
-  if (plScreenSpaceShadowDataProvider* pShadowProvider = GetPipeline()->GetFrameDataProvider<plScreenSpaceShadowDataProvider>())
+  plUInt32 uiShadowLayersTotal = 0;
+  if (plContactShadowDataProvider* pShadowProvider = GetPipeline()->GetFrameDataProvider<plContactShadowDataProvider>())
   {
-    if (!pShadowProvider->GetTexture().IsInvalidated())
+    const plGALTextureHandle hShadowTexture = pShadowProvider->GetTexture();
+    if (const plGALTexture* pShadowTexture = hShadowTexture.IsInvalidated() ? nullptr : ref_graph.GetDevice()->GetTexture(hShadowTexture))
     {
-      hScreenSpaceShadow = ref_graph.ImportTexture(pShadowProvider->GetTexture(),
-        plGALResourceState::UnorderedAccessWrite, plGALShaderStageFlags::ComputeShader);
+      hScreenSpaceShadow = ref_graph.ImportTexture(hShadowTexture);
+      uiShadowLayersTotal = pShadowTexture->GetDescription().m_uiArraySize;
     }
   }
 
@@ -315,13 +320,18 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
         const bool bHasLight = !m_vMainLightColorIntensity.IsZero(0.0001f) && !m_vMainLightDirection.IsZero(0.0001f);
         const bool bHasGBuffer1 = !hGBuffer1.IsInvalidated();
         bool bHasShadow = false;
+        plUInt32 uiShadowSlotsPerEye = 0;
         if (!hScreenSpaceShadow.IsInvalidated())
         {
-          // The graph handle is declared up front, but the producer only publishes its persistent texture after
-          // a successful dispatch. Re-check at execution time so a shader/dispatch failure cannot gate caustics
-          // with undefined or stale shadow data in this frame.
-          if (plScreenSpaceShadowDataProvider* pShadowProvider = GetPipeline()->GetFrameDataProvider<plScreenSpaceShadowDataProvider>())
-            bHasShadow = !pShadowProvider->GetTexture().IsInvalidated();
+          // The texture is imported while the graph is built, but whether the sun owns slot 0 is only known once the
+          // slot selection ran for this view. Without a traced sun the layers hold other lights' shadows.
+          if (plContactShadowDataProvider* pShadowProvider = GetPipeline()->GetFrameDataProvider<plContactShadowDataProvider>())
+          {
+            const plContactShadowData* pShadowData = pShadowProvider->GetData(renderViewContext);
+            uiShadowSlotsPerEye = uiShadowLayersTotal / uiArraySize;
+            bHasShadow = pShadowData != nullptr && !pShadowProvider->GetTexture().IsInvalidated() && !pShadowData->m_Slots.IsEmpty() &&
+                         pShadowData->m_Slots[0].m_bSun && uiShadowSlotsPerEye > 0;
+          }
         }
         const bool bFallbackValid = m_vCausticFallbackCenterHeightValidity.w > 0.5f;
         const bool bHasTransmittedSource = quality.m_bUseTransmittedCaustics &&
@@ -342,7 +352,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
           1.0f / static_cast<float>(uiCausticWidth), 1.0f / static_cast<float>(uiCausticHeight));
         // The inverse trace cannot reconstruct a footprint narrower than the rasterized source field. Matching
         // the kernel/tolerance to one field texel avoids sub-texel sparkle and stabilizes projected energy.
-        constants->WaterCausticTraceParams = plVec4(fMaxDistance, fFieldTexelSize, bHasSource ? 1.0f : 0.0f, 0.0f);
+        constants->WaterCausticTraceParams = plVec4(fMaxDistance, fFieldTexelSize, bHasSource ? 1.0f : 0.0f, static_cast<float>(uiShadowSlotsPerEye));
         constants->WaterCausticFieldCenterAndExtent = m_vCausticFieldCenterAndExtent;
         constants->WaterCausticFallbackBounds = m_vCausticFallbackBounds;
         constants->WaterCausticFallbackCenterHeightValidity = m_vCausticFallbackCenterHeightValidity;
