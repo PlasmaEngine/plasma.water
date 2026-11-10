@@ -1,5 +1,9 @@
 #include <WaterPlugin/WaterPluginPCH.h>
 
+#include <Foundation/Configuration/CVar.h>
+#include <RendererCore/Pipeline/RenderPipeline.h>
+#include <RendererCore/Pipeline/RenderPipelinePass.h>
+#include <RendererCore/Pipeline/ViewData.h>
 #include <RendererFoundation/Device/DeviceCapabilities.h>
 #include <RendererFoundation/RendererFoundationDLL.h>
 #include <RendererFoundation/Resources/ResourceFormats.h>
@@ -10,6 +14,22 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plWaterQualityTier, 1)
   PL_ENUM_CONSTANTS(plWaterQualityTier::Low, plWaterQualityTier::Balanced, plWaterQualityTier::High, plWaterQualityTier::Ultra)
 PL_END_STATIC_REFLECTED_ENUM;
 // clang-format on
+
+plCVarInt cvar_WaterQuality("Water.Quality", plWaterQualityTier::High, plCVarFlags::Save,
+  "Quality of water in pipelines that get their water passes from the engine: 0 = Low, 1 = Balanced, 2 = High, 3 = Ultra. A water pass placed by hand in a pipeline asset uses its own Quality property.");
+
+plWaterQualityTier::Enum plWaterQualitySettings::SelectTier(const plRenderPipelinePass& pass, plWaterQualityTier::Enum nodeTier, const plViewData& viewData)
+{
+  const plRenderPipeline* pPipeline = pass.GetPipeline();
+  if (pPipeline == nullptr || !pPipeline->IsPassInjected(&pass))
+    return nodeTier;
+
+  // A probe or a render target shows water small or blurred. It gets the surface and nothing that costs a pass of its own.
+  if (viewData.m_CameraUsageHint == plCameraUsageHint::Reflection || viewData.m_CameraUsageHint == plCameraUsageHint::RenderTarget)
+    return plWaterQualityTier::Low;
+
+  return static_cast<plWaterQualityTier::Enum>(plMath::Clamp<plInt32>(cvar_WaterQuality.GetValue(), plWaterQualityTier::Low, plWaterQualityTier::Ultra));
+}
 
 plWaterQualitySettings plWaterQualitySettings::Resolve(plWaterQualityTier::Enum requestedTier, const plGALDeviceCapabilities& capabilities)
 {
@@ -62,7 +82,7 @@ plWaterQualitySettings plWaterQualitySettings::Resolve(plWaterQualityTier::Enum 
       result.m_uiInteractionEventBudget = 512;
       result.m_uiInteractionEventsPerTile = 16;
       result.m_uiCausticRaySteps = 8;
-      result.m_uiScreenSpaceReflectionSteps = 6;
+      result.m_uiScreenSpaceReflectionSteps = 8;
       result.m_fCausticResolutionScale = 1.0f;
       break;
 

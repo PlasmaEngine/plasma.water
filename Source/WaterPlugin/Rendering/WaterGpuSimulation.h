@@ -37,7 +37,11 @@ public:
   void QueueInteractions(plArrayPtr<const plWaterInteraction> interactions);
   void AddRenderPasses(plRenderGraph& ref_graph, plRenderPipeline* pPipeline, plDelegate<void()> profileRefreshCallback = {});
 
+  /// Per profile slot and cascade: where the waves move a point of the still surface to (xyz) and how far the
+  /// surface is folded there (w). With mips.
   plGALTextureHandle GetSpectrumDisplacement() const;
+  /// Per profile slot and cascade: the height gradient (xy), its squared length (z) and the Jacobian (w). With mips.
+  plGALTextureHandle GetSpectrumSlope() const { return m_hSpectrumSlope; }
   plGALTextureHandle GetInteractionAtlas() const;
   bool HasValidSpectrum() const { return m_bSpectrumValid; }
   bool HasInteractionData() const { return m_bInteractionAtlasContainsData; }
@@ -53,9 +57,19 @@ private:
 
   plWaterQualitySettings m_Quality;
   plShaderResourceHandle m_hSpectrumShader;
+  plShaderResourceHandle m_hSpectrumFftShader;
+  plShaderResourceHandle m_hSpectrumAssembleShader;
   plShaderResourceHandle m_hInteractionShader;
   plConstantBufferStorageHandle m_hConstants; ///< Spectrum pass constants.
   plGALTextureHandle m_hSpectrum;
+  plGALTextureHandle m_hSpectrumSlope;
+  /// What is left of the foam that breaking waves made in earlier frames, per cascade.
+  plGALTextureHandle m_hSpectrumFoam;
+  plTime m_LastFoamTime;
+  bool m_bFoamHistoryValid = false;
+  /// The wave field in the frequency domain, and the scratch pair for the first half of its transform.
+  plGALTextureHandle m_hSpectrumFrequency[2];
+  plGALTextureHandle m_hSpectrumScratch[2];
   plGALTextureHandle m_hInteraction;
   plGALBufferHandle m_hProfileBuffer;
   plGALBufferHandle m_hInteractionBuffer;
@@ -66,6 +80,15 @@ private:
     plWaterProfileResourceDescriptor m_Profile;
     bool m_bInUse = false;
   };
+  /// The amplitude scale of a slot's spectrum, and what it was computed for. Adding the spectrum up takes about a
+  /// millisecond, so it is done when a profile changes and not every frame.
+  struct ScaleCache
+  {
+    plUInt64 m_uiKey = 0;
+    float m_fScale = 0.0f;
+  };
+  ScaleCache m_ScaleCache[MaxSpectrumProfiles];
+  float GetAmplitudeScale(plUInt32 uiSlot);
   plStaticArray<ProfileSlot, MaxSpectrumProfiles> m_Profiles;
 
   /// An admitted interaction: one analytic expanding ring, alive until its lifetime expires. The atlas is a

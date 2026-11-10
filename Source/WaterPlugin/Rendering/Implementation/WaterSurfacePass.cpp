@@ -1,5 +1,6 @@
 #include <WaterPlugin/WaterPluginPCH.h>
 
+#include <Foundation/Configuration/CVar.h>
 #include <Foundation/IO/TypeVersionContext.h>
 #include <RendererCore/Lights/ContactShadowDataProvider.h>
 #include <RendererCore/Pipeline/RenderPipeline.h>
@@ -16,6 +17,7 @@
 
 #include <Shaders/Water/WaterCausticFieldConstants.h>
 #include <Shaders/Water/WaterCausticsConstants.h>
+#include <Shaders/Water/WaterProfileData.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterSurfacePass, 1, plRTTIDefaultAllocator<plWaterSurfacePass>)
@@ -37,6 +39,14 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterSurfacePass, 1, plRTTIDefaultAllocator<pl
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
+
+plCVarBool cvar_WaterDebugFailSurfacePass("Water.Debug.FailSurfacePass", false, plCVarFlags::Default,
+  "Makes the water surface pass report a failure while its render graph is built. For checking that the rest of the frame still renders.");
+
+plCVarBool cvar_WaterDebugNoCaustics("Water.Debug.NoCaustics", false, plCVarFlags::Default,
+  "Leaves out the caustic field, trace and composite passes on every tier. For finding out what caustics cost.");
+plCVarBool cvar_WaterDebugNoSpectrum("Water.Debug.NoSpectrum", false, plCVarFlags::Default,
+  "Leaves out the wave spectrum and interaction passes on every tier. For finding out what they cost.");
 
 namespace
 {
@@ -71,6 +81,11 @@ plWaterSurfacePass::~plWaterSurfacePass()
 {
   plRenderContext::DeleteConstantBufferStorage(m_hCausticsConstants);
   plRenderContext::DeleteConstantBufferStorage(m_hCausticFieldConstants);
+  if (!m_hProfileTable.IsInvalidated())
+  {
+    plGALDevice::GetDefaultDevice()->DestroyBuffer(m_hProfileTable);
+    m_hProfileTable.Invalidate();
+  }
 }
 
 plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const plCamera& camera, plRenderGraph& ref_graph, const plArrayPtr<const plRenderPipelinePinConnection> inputs, plArrayPtr<plRenderPipelinePinConnection> outputs)
@@ -99,16 +114,42 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     return plStatus(plFmt("DepthStencil: Not connected"));
   if (hResolvedDepth.IsInvalidated())
     return plStatus(plFmt("ResolvedDepth: Not connected"));
+  if (cvar_WaterDebugFailSurfacePass)
+    return plStatus(plFmt("Water.Debug.FailSurfacePass is set"));
 
   outputs[m_PinColor.m_uiOutputIndex].m_TextureHandle = hColor;
   outputs[m_PinDepthStencil.m_uiOutputIndex].m_TextureHandle = hDepthStencil;
+
+  // No water body was extracted for this view (recently): no targets, no wave simulation, no draws. The pass is in
+  // every pipeline with a transparent pass once the package is installed, so a scene without water must not pay for it.
+  // The content flags are part of the graph's fingerprint: the graph is rebuilt when water comes into view.
+  if ((GetPipeline()->GetContentFlags() & PL_WATER_CONTENT_FLAG_SURFACES) == 0)
+  {
+    // Clear the handles but keep the connectivity, or a later build could not hand a texture through the connection.
+    outputs[m_PinWaterDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterDepth.m_uiOutputIndex].m_Connectivity);
+    outputs[m_PinWaterExitDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterExitDepth.m_uiOutputIndex].m_Connectivity);
+    return plStatus(PL_SUCCESS);
+  }
 
   const plGALTextureCreationDescription colorDesc = ref_graph.GetTextureDesc(hColor);
   const plUInt32 uiWidth = colorDesc.m_uiWidth;
   const plUInt32 uiHeight = colorDesc.m_uiHeight;
   const plUInt32 uiArraySize = plMath::Max(colorDesc.m_uiArraySize, 1u);
 
-  const plWaterQualitySettings quality = plWaterQualitySettings::Resolve(m_Quality, ref_graph.GetDevice()->GetCapabilities());
+  plWaterQualitySettings quality = plWaterQualitySettings::Resolve(plWaterQualitySettings::SelectTier(*this, m_Quality, viewData), ref_graph.GetDevice()->GetCapabilities());
+  if (cvar_WaterDebugNoCaustics)
+  {
+    quality.m_bUseTransmittedCaustics = false;
+    quality.m_bUseReflectedCaustics = false;
+    quality.m_bUseUnderwaterCaustics = false;
+  }
+  if (cvar_WaterDebugNoSpectrum)
+  {
+    quality.m_bUseSpectrum = false;
+    quality.m_uiSpectrumCascadeCount = 0;
+    quality.m_uiSpectrumResolution = 0;
+    quality.m_uiInteractionAtlasSize = 0;
+  }
 
   const plGALTextureCreationDescription waterDepthDesc = MakeWaterTextureDesc(colorDesc, uiWidth, uiHeight, plGALResourceFormat::RFloat);
   const plRenderGraphTextureHandle hWaterDepth = ref_graph.CreateTexture(waterDepthDesc);
@@ -128,6 +169,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
   }
 
   plRenderGraphTextureHandle hSimulationSpectrum;
+  plRenderGraphTextureHandle hSimulationSlope;
   plRenderGraphTextureHandle hSimulationInteraction;
   if (m_bSimulationInitialized)
   {
@@ -137,9 +179,36 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
 
     if (!m_GpuSimulation.GetSpectrumDisplacement().IsInvalidated())
       hSimulationSpectrum = ref_graph.ImportTexture(m_GpuSimulation.GetSpectrumDisplacement());
+    if (!m_GpuSimulation.GetSpectrumSlope().IsInvalidated())
+      hSimulationSlope = ref_graph.ImportTexture(m_GpuSimulation.GetSpectrumSlope());
     if (!m_GpuSimulation.GetInteractionAtlas().IsInvalidated())
       hSimulationInteraction = ref_graph.ImportTexture(m_GpuSimulation.GetInteractionAtlas());
   }
+
+  // The profile table: every water draw of this frame reads its profiles from it by index.
+  if (m_hProfileTable.IsInvalidated())
+  {
+    plGALBufferCreationDescription tableDesc;
+    tableDesc.m_uiStructSize = sizeof(plWaterGpuProfile);
+    tableDesc.m_uiTotalSize = WATER_MAX_PROFILES * tableDesc.m_uiStructSize;
+    tableDesc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource;
+    tableDesc.m_ResourceAccess.m_bImmutable = false;
+    m_hProfileTable = ref_graph.GetDevice()->CreateBuffer(tableDesc);
+    if (m_hProfileTable.IsInvalidated())
+      return plStatus(plFmt("WaterSurfacePass: the profile table buffer could not be created"));
+  }
+  const plRenderGraphBufferHandle hProfileTable = ref_graph.ImportBuffer(m_hProfileTable);
+  {
+    // Executes every frame, also when the graph itself is served from the cache: profiles are edited live.
+    auto pass = ref_graph.AddTransferPass("Water Profile Upload");
+    pass.WriteBuffer(hProfileTable, plGALResourceState::CopyDestination);
+    pass.SetExecuteCallback([=](const plRenderGraphContext& ctx) {
+      const plRenderViewContext& renderViewContext = *ctx.GetUserData<plRenderViewContext>();
+      FetchPerFrameWaterData(renderViewContext);
+      UploadProfileTable(ctx, hProfileTable);
+    });
+  }
+  const plBitflags<plGALShaderStageFlags> profileTableStages = plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader;
 
   // Water attributes are rendered without attaching the potentially multisampled opaque depth. The shader compares
   // against ResolvedDepth and discards occluded fragments, leaving single-sample attributes suitable for compute.
@@ -148,9 +217,13 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     pass.AddColorTarget(hWaterDepth, {}, plGALRenderTargetLoadOp::Clear);
     pass.SetClearColor(0, plColor::Black);
     pass.ReadTexture(hResolvedDepth, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::PixelShader);
+    pass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
     if (!hSimulationSpectrum.IsInvalidated())
       pass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+    if (!hSimulationSlope.IsInvalidated())
+      pass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
     if (!hSimulationInteraction.IsInvalidated())
       pass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
         plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -169,7 +242,9 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       renderViewContext.m_pRenderContext->SetShaderPermutationVariable("RENDER_PASS", "RENDER_PASS_FORWARD");
       renderViewContext.m_pRenderContext->SetShaderPermutationVariable("WATER_RENDER_PASS", "WATER_RENDER_PASS_ATTRIBUTES");
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterOpaqueDepth", ctx.ResolveTexture(hResolvedDepth));
+      renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+      renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
       RenderObjects(renderViewContext);
     });
@@ -181,9 +256,13 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     auto pass = ref_graph.AddGraphicsPass("Water Volume Exit Depth");
     pass.AddColorTarget(hWaterExitDepth, {}, plGALRenderTargetLoadOp::Clear);
     pass.SetClearColor(0, plColor::Black);
+    pass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
     if (!hSimulationSpectrum.IsInvalidated())
       pass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+    if (!hSimulationSlope.IsInvalidated())
+      pass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
     if (!hSimulationInteraction.IsInvalidated())
       pass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
         plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -211,7 +290,9 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
         renderViewContext.m_pRenderContext->SetShaderPermutationVariable("WATER_USE_SSR", "FALSE");
       renderViewContext.m_pRenderContext->SetShaderPermutationVariable("RENDER_PASS", "RENDER_PASS_FORWARD");
       renderViewContext.m_pRenderContext->SetShaderPermutationVariable("WATER_RENDER_PASS", "WATER_RENDER_PASS_VOLUME");
+      renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+      renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
       RenderObjects(renderViewContext);
     });
@@ -248,9 +329,13 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       fieldPass.AddColorTarget(hCausticFieldData, {}, plGALRenderTargetLoadOp::Clear);
       fieldPass.SetClearColor(0, plColor::Black);
       fieldPass.SetClearColor(1, plColor::Black);
+      fieldPass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
       if (!hSimulationSpectrum.IsInvalidated())
         fieldPass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-          plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+          plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+      if (!hSimulationSlope.IsInvalidated())
+        fieldPass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+          plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
       if (!hSimulationInteraction.IsInvalidated())
         fieldPass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
           plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -291,7 +376,9 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
 
         plBindGroupBuilder& bindGroup = renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS);
         bindGroup.BindBuffer("plWaterCausticFieldConstants", m_hCausticFieldConstants);
+        bindGroup.BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
         bindGroup.BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+        bindGroup.BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
         bindGroup.BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
         RenderObjects(renderViewContext);
       });
@@ -437,10 +524,14 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     // (A true read-only depth attachment is not supported by the Vulkan backend yet.)
     pass.AddDepthStencilTarget(hDepthStencil);
     pass.ReadTexture(hSceneColor, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::PixelShader);
+    pass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
     pass.ReadTexture(hResolvedDepth, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::PixelShader);
     if (!hSimulationSpectrum.IsInvalidated())
       pass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+    if (!hSimulationSlope.IsInvalidated())
+      pass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
     if (!hSimulationInteraction.IsInvalidated())
       pass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
         plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -463,8 +554,10 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       renderViewContext.m_pRenderContext->SetShaderPermutationVariable("WATER_RENDER_PASS", "WATER_RENDER_PASS_SURFACE");
       plBindGroupBuilder& bindGroup = renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS);
       bindGroup.BindTexture("WaterSceneColor", ctx.ResolveTexture(hSceneColor));
+      bindGroup.BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
       bindGroup.BindTexture("WaterOpaqueDepth", ctx.ResolveTexture(hResolvedDepth));
       bindGroup.BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+      bindGroup.BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
       bindGroup.BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
       RenderObjects(renderViewContext);
     });
@@ -490,8 +583,8 @@ void plWaterSurfacePass::RefreshGpuSpectrumProfiles()
   {
     for (auto it = waterBatches.GetBatch(uiBatch).GetIterator<plWaterRenderData>(); it.IsValid(); ++it)
     {
-      m_bHasTransmittedCausticSources |= it->m_fUnderwaterCaustics > 0.0f || it->m_fSecondaryUnderwaterCaustics > 0.0f;
-      m_bHasReflectedCausticSources |= it->m_fReflectedCaustics > 0.0f || it->m_fSecondaryReflectedCaustics > 0.0f;
+      m_bHasTransmittedCausticSources |= it->m_fUnderwaterCaustics > 0.0f;
+      m_bHasReflectedCausticSources |= it->m_fReflectedCaustics > 0.0f;
 
       if (!m_bSimulationInitialized || it->m_uiGpuCascadeCount == 0 ||
           registeredProfiles.GetCount() >= plWaterGpuSimulation::MaxSpectrumProfiles)
@@ -512,6 +605,7 @@ void plWaterSurfacePass::RefreshGpuSpectrumProfiles()
       profile.m_uiWaveSeed = it->m_uiWaveSeed;
       profile.m_SpectrumMode = static_cast<plWaterWaveSpectrumMode::Enum>(it->m_uiSpectrumMode);
       profile.m_fSmallestGpuWavelength = plMath::Max(it->m_fSmallestGpuWavelength, 0.01f);
+      profile.m_fFoamCrestThreshold = it->m_fFoamCrestThreshold;
       profile.m_uiGpuCascadeCount = static_cast<plUInt8>(plMath::Min<plUInt32>(it->m_uiGpuCascadeCount, m_SimulationQuality.m_uiSpectrumCascadeCount));
       profile.m_uiGpuCascadeResolution = m_SimulationQuality.m_uiSpectrumResolution;
       // Compact live profiles into the lowest slots so the spectrum pass can trim trailing array layers.
@@ -524,6 +618,44 @@ void plWaterSurfacePass::RefreshGpuSpectrumProfiles()
       registeredProfiles.PushBack(it->m_uiProfileIndex);
     }
   }
+}
+
+void plWaterSurfacePass::UploadProfileTable(const plRenderGraphContext& ctx, plRenderGraphBufferHandle hProfileTable)
+{
+  // Which profiles have a slot in the spectrum simulation is decided from this frame's draws.
+  RefreshGpuSpectrumProfiles();
+
+  plWaterGpuProfile table[WATER_MAX_PROFILES];
+  plUInt32 uiCount = 0;
+  if (plWaterFrameDataProvider* pProvider = GetPipeline()->GetFrameDataProvider<plWaterFrameDataProvider>())
+  {
+    const plRenderViewContext& renderViewContext = *ctx.GetUserData<plRenderViewContext>();
+    if (const plWaterFrameData* pFrameData = pProvider->GetData(renderViewContext))
+    {
+      uiCount = plMath::Min<plUInt32>(pFrameData->m_uiProfileCount, WATER_MAX_PROFILES);
+      plMemoryUtils::RawByteCopy(table, pFrameData->m_Profiles, sizeof(plWaterGpuProfile) * uiCount);
+    }
+  }
+  if (uiCount == 0)
+  {
+    // A pipeline without the water extractor still draws: every index then reads the default profile.
+    plWaterFillGpuProfile(table[0], plWaterProfileResourceDescriptor(), plWaterBodyType::Ocean, 0.0f);
+    uiCount = 1;
+  }
+
+  const plUInt32 uiAvailableCascades = GetSpectrumLayerCount() / plWaterGpuSimulation::MaxSpectrumProfiles;
+  for (plUInt32 i = 0; i < uiCount; ++i)
+  {
+    const plUInt32 uiSlot = GetGpuProfileSlot(i);
+    const plUInt32 uiWanted = static_cast<plUInt32>(table[i].SpectrumParams.y);
+    table[i].SpectrumParams.x = uiSlot != plInvalidIndex ? static_cast<float>(uiSlot) : 0.0f;
+    table[i].SpectrumParams.y = uiSlot != plInvalidIndex ? static_cast<float>(plMath::Min(uiWanted, uiAvailableCascades)) : 0.0f;
+  }
+  m_uiProfileCount = uiCount;
+
+  // AheadOfTime: the default update mode only delivers to transient constant buffers.
+  ctx.GetCommandEncoder()->UpdateBuffer(ctx.ResolveBuffer(hProfileTable), 0,
+    plArrayPtr<const plUInt8>(reinterpret_cast<const plUInt8*>(table), uiCount * sizeof(plWaterGpuProfile)), plGALUpdateMode::AheadOfTime);
 }
 
 void plWaterSurfacePass::FetchPerFrameWaterData(const plRenderViewContext& renderViewContext)
@@ -577,8 +709,9 @@ plStatus plWaterSurfacePass::AddRenderPassesInactive(const plViewData& viewData,
 
   outputs[m_PinColor.m_uiOutputIndex] = inputs[m_PinColor.m_uiInputIndex];
   outputs[m_PinDepthStencil.m_uiOutputIndex] = inputs[m_PinDepthStencil.m_uiInputIndex];
-  outputs[m_PinWaterDepth.m_uiOutputIndex] = plRenderPipelinePinConnection();
-  outputs[m_PinWaterExitDepth.m_uiOutputIndex] = plRenderPipelinePinConnection();
+  // Keep the connectivity: a connection without it drops the texture the pass hands over once it is active again.
+  outputs[m_PinWaterDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterDepth.m_uiOutputIndex].m_Connectivity);
+  outputs[m_PinWaterExitDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterExitDepth.m_uiOutputIndex].m_Connectivity);
   return plStatus(PL_SUCCESS);
 }
 

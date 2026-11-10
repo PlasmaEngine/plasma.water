@@ -49,6 +49,12 @@ public:
 
   float GetBlendDistance() const { return m_fBlendDistance; }
   void SetBlendDistance(float fDistance);
+  /// Blend Distance is the mix length of the junction: how far the two waters mix across the mouth, in metres. The
+  /// receiver's side gets all of it, the river's side a part. With AutoBlendDistance it follows the river's width.
+  /// Front Breakup is how ragged the front between the two waters is drawn: 0 is a smooth ramp, 1 is torn.
+  float GetFrontBreakup() const { return m_fFrontBreakup; }
+  void SetFrontBreakup(float fBreakup);
+
   float GetSnapRadius() const { return m_fSnapRadius; }
   void SetSnapRadius(float fDistance);
   float GetElevationTolerance() const { return m_fElevationTolerance; }
@@ -73,6 +79,7 @@ protected:
   plGameObjectHandle m_hBodyA;
   plGameObjectHandle m_hBodyB;
   float m_fBlendDistance = 5.0f;
+  float m_fFrontBreakup = 0.5f;
   float m_fSnapRadius = 5.0f;
   float m_fElevationTolerance = 0.25f;
   bool m_bAutoSnap = true;

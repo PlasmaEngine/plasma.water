@@ -15,7 +15,24 @@ public:
   bool SetViewRenderMode(plViewRenderMode::Enum mode);
 };
 
-class plWaterRenderingTestApplication : public plGameEngineTestApplication
+/// \brief What every water test application needs: this package's plugin on the search path, its Assets mounted.
+class plWaterTestApplication : public plGameEngineTestApplication
+{
+public:
+  explicit plWaterTestApplication(const char* szProjectDirName);
+
+  /// Where the SDK's binaries, this package's plugin and its Assets folder are. The test executable sits in the
+  /// package, away from the engine's plugins (the renderer, for one), and is not installed anywhere. So it tells
+  /// the application what an installation would have set up: plugin search roots, and Assets mounted as the data
+  /// directory "plasma.water".
+  static void SetPackageDirectories(plStringView sSdkBinaryDirectory, plStringView sPluginDirectory, plStringView sAssetsDirectory);
+
+protected:
+  virtual void Init_AddPluginSearchRoots() override;
+  virtual void Init_FileSystem_ConfigureDataDirs() override;
+};
+
+class plWaterRenderingTestApplication : public plWaterTestApplication
 {
 public:
   plWaterRenderingTestApplication();

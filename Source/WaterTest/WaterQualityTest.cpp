@@ -1,4 +1,4 @@
-#include <GameEngineTest/GameEngineTestPCH.h>
+#include <WaterTest/WaterTestPCH.h>
 
 #include <RendererFoundation/Device/DeviceCapabilities.h>
 #include <RendererFoundation/Resources/ResourceFormats.h>
@@ -66,7 +66,7 @@ PL_CREATE_SIMPLE_TEST(Water, Quality)
     PL_TEST_BOOL(high.m_bUseUnderwaterCaustics);
     PL_TEST_FLOAT(high.m_fCausticResolutionScale, 0.5f, 0.0f);
     PL_TEST_INT(high.m_uiCausticRaySteps, 6);
-    PL_TEST_INT(high.m_uiScreenSpaceReflectionSteps, 4);
+    PL_TEST_INT(high.m_uiScreenSpaceReflectionSteps, 6);
 
     const plWaterQualitySettings ultra = plWaterQualitySettings::Resolve(plWaterQualityTier::Ultra, desktopCapabilities);
     PL_TEST_INT(ultra.m_uiOceanCellsPerRing, 64);
@@ -77,7 +77,7 @@ PL_CREATE_SIMPLE_TEST(Water, Quality)
     PL_TEST_BOOL(ultra.m_bUseScreenSpaceReflections);
     PL_TEST_FLOAT(ultra.m_fCausticResolutionScale, 1.0f, 0.0f);
     PL_TEST_INT(ultra.m_uiCausticRaySteps, 8);
-    PL_TEST_INT(ultra.m_uiScreenSpaceReflectionSteps, 6);
+    PL_TEST_INT(ultra.m_uiScreenSpaceReflectionSteps, 8);
   }
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "Capability fallback")
@@ -92,7 +92,7 @@ PL_CREATE_SIMPLE_TEST(Water, Quality)
     PL_TEST_BOOL(!high.m_bUseUnderwaterCaustics);
     PL_TEST_FLOAT(high.m_fCausticResolutionScale, 0.0f, 0.0f);
     PL_TEST_INT(high.m_uiCausticRaySteps, 0);
-    PL_TEST_INT(high.m_uiScreenSpaceReflectionSteps, 4);
+    PL_TEST_INT(high.m_uiScreenSpaceReflectionSteps, 6);
 
     const plGALDeviceCapabilities noHalfUavCapabilities = MakeWaterCapabilities(true, false, true);
     const plWaterQualitySettings noHalfUav = plWaterQualitySettings::Resolve(plWaterQualityTier::High, noHalfUavCapabilities);

@@ -7,9 +7,20 @@ DESKTOP
 
 #include <Shaders/Common/Common.h>
 #include <Shaders/Water/WaterSimulationConstants.h>
+#include <Shaders/Water/WaterSpectrumShape.h>
+
+// The wave field of every cascade at the current time, in the frequency domain. Stateless: the random amplitudes
+// are a hash of the wave vector and the profile's seed, so nothing has to be kept from frame to frame and a profile
+// can change at any time. WaterSpectrumFft turns the result into heights, displacements and slopes.
+//
+// Eight real fields are transformed as four complex ones (a real field's transform is Hermitian, so two fit into one
+// complex transform as A + iB):
+//   A.xy = height + i * displacement x        A.zw = displacement y + i * slope x
+//   B.xy = slope y + i * d(displacement x)/dx B.zw = d(displacement y)/dy + i * d(displacement x)/dy
 
 StructuredBuffer<plWaterGpuSpectrumProfile> WaterSpectrumProfiles;
-RWTexture2DArray<float4> WaterSpectrumOutput;
+RWTexture2DArray<float4> WaterSpectrumFrequencyA;
+RWTexture2DArray<float4> WaterSpectrumFrequencyB;
 
 uint HashWaterSpectrum(uint value)
 {
@@ -20,171 +31,102 @@ uint HashWaterSpectrum(uint value)
   return value ^ (value >> 16);
 }
 
-float WaterHash01(uint value)
+// Two independent normal deviates for one wave vector.
+float2 WaterGaussianPair(int2 waveIndex, uint seed)
 {
-  return float(HashWaterSpectrum(value) & 0xffffu) / 65535.0;
+  const uint h0 = HashWaterSpectrum(uint(waveIndex.x + 32768) ^ (HashWaterSpectrum(uint(waveIndex.y + 32768) ^ seed) * 0x9e3779b9u));
+  const uint h1 = HashWaterSpectrum(h0 ^ 0x68bc21ebu);
+  const float u0 = (float(h0 >> 8) + 1.0) / 16777217.0;
+  const float u1 = float(h1 >> 8) / 16777216.0;
+  const float radius = sqrt(-2.0 * log(u0));
+  float s;
+  float c;
+  sincos(6.2831853 * u1, s, c);
+  return float2(radius * c, radius * s);
 }
 
-float WaterPhillipsEnergy(float waveNumber, float2 direction, float2 windDirection, float windSpeed)
+// The amplitude of one wave of the lattice before time is applied.
+float2 WaterInitialAmplitude(int2 waveIndex, float domainLength, float bandLow, float bandHigh, plWaterGpuSpectrumProfile profile, uint seed)
 {
-  const float largestWave = max(windSpeed * windSpeed / 9.81, 0.1);
-  const float smallWaveDamping = largestWave * 0.015;
-  const float alignment = pow(max(abs(dot(direction, windDirection)), 0.08), 2.0);
-  const float k2 = max(waveNumber * waveNumber, 1.0e-5);
-  return alignment * exp(-1.0 / max(k2 * largestWave * largestWave, 1.0e-5)) /
-         max(k2 * k2, 1.0e-5) * exp(-k2 * smallWaveDamping * smallWaveDamping);
+  const float deltaK = 6.2831853 / domainLength;
+  const float2 k = float2(waveIndex) * deltaK;
+  const float waveNumber = length(k);
+  // Each cascade carries its own band and nothing else, so no wave is counted in two cascades.
+  if (waveNumber < max(bandLow, deltaK * 0.5) || waveNumber >= bandHigh)
+    return 0.0;
+
+  const float2 wind = normalize(profile.WindDirectionSpeedAmplitude.xy + float2(1.0e-5, 0.0));
+  const float density = WaterSpectrumDensity(k.x, k.y, wind.x, wind.y, profile.WaveParams.x, float(profile.ProfileParams.y));
+  const float amplitude = sqrt(max(density, 0.0)) * deltaK * profile.WaveParams.w;
+  return WaterGaussianPair(waveIndex, seed) * (amplitude * 0.70710678);
 }
 
-float WaterJonswapEnergy(float waveNumber, float2 direction, float2 windDirection, float windSpeed, float peakWavelength)
+float2 ComplexMultiply(float2 a, float2 b)
 {
-  const float angularFrequency = sqrt(9.81 * max(waveNumber, 1.0e-4));
-  const float frequency = angularFrequency / 6.2831853;
-  const float peakWaveNumber = 6.2831853 / max(peakWavelength, 0.05);
-  const float peakFrequency = sqrt(9.81 * peakWaveNumber) / 6.2831853;
-  const float frequencyRatio = peakFrequency / max(frequency, 1.0e-4);
-  const float sigma = frequency <= peakFrequency ? 0.07 : 0.09;
-  const float peakDistance = (frequency - peakFrequency) / max(sigma * peakFrequency, 1.0e-4);
-  const float peakShape = exp(-0.5 * peakDistance * peakDistance);
-  const float gamma = pow(3.3, peakShape);
-  const float baseSpectrum = pow(max(frequency, 1.0e-3), -5.0) * exp(-1.25 * pow(frequencyRatio, 4.0));
-  const float alignment = pow(max(abs(dot(direction, windDirection)), 0.06), 4.0);
-  // Wind speed controls energy without allowing authored calm water to collapse into denormals.
-  return baseSpectrum * gamma * alignment * max(windSpeed * windSpeed, 0.25);
+  return float2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
-float2 SelectPeriodicWaveVector(uint componentIndex, uint seed, float2 windDirection)
+// A + iB for two complex numbers.
+float2 ComplexPack(float2 a, float2 b)
 {
-  static const int2 periodicVectors[8] =
-  {
-    int2(1, 0), int2(1, 1), int2(2, 1), int2(3, 1),
-    int2(3, 2), int2(4, 1), int2(4, 3), int2(5, 2),
-  };
-
-  int2 waveVector = periodicVectors[componentIndex & 7u];
-  const uint hash = HashWaterSpectrum(seed ^ (componentIndex * 0x9e3779b9u));
-  if ((hash & 1u) != 0u)
-    waveVector = waveVector.yx;
-  if ((hash & 2u) != 0u)
-    waveVector.x = -waveVector.x;
-  if ((hash & 4u) != 0u)
-    waveVector.y = -waveVector.y;
-
-  // Flipping a periodic integer vector preserves seamless tiling while keeping most energy down-wind.
-  float2 result = float2(waveVector);
-  if (dot(normalize(result), windDirection) < 0.0)
-    result = -result;
-  return result;
+  return float2(a.x - b.y, a.y + b.x);
 }
-
-// Spectrum parameters are constant for every texel in a profile/cascade layer. Evaluate the expensive
-// Phillips/JONSWAP terms once per 8x8 group rather than repeating exp/pow/sqrt work for all 64 pixels.
-groupshared float2 s_PeriodicWaveVectors[8];
-groupshared float2 s_WaveDirections[8];
-groupshared float s_WaveNumbers[8];
-groupshared float s_PhaseOffsets[8];
-groupshared float s_AngularFrequencies[8];
-groupshared float s_ComponentWeights[8];
-groupshared float s_ComponentWeightSum;
 
 [numthreads(WATER_SIMULATION_THREAD_GROUP_SIZE, WATER_SIMULATION_THREAD_GROUP_SIZE, 1)]
-void main(uint3 dispatchThreadId : SV_DispatchThreadID, uint groupThreadIndex : SV_GroupIndex)
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-  const bool inBounds = dispatchThreadId.x < WaterSimulationSize.x && dispatchThreadId.y < WaterSimulationSize.y &&
-                        dispatchThreadId.z < WaterSimulationSize.z;
-  if (dispatchThreadId.z >= WaterSimulationSize.z)
+  if (dispatchThreadId.x >= WaterSimulationSize.x || dispatchThreadId.y >= WaterSimulationSize.y || dispatchThreadId.z >= WaterSimulationSize.z)
     return;
 
-  const uint cascadeCount = max(WaterSimulationSize.z / WATER_MAX_SPECTRUM_PROFILES, 1u);
-  const uint profileIndex = min(dispatchThreadId.z / cascadeCount, WATER_MAX_SPECTRUM_PROFILES - 1u);
-  const uint cascadeIndex = dispatchThreadId.z % cascadeCount;
+  const uint cascadeSlots = max(WaterSimulationSize.z / WATER_MAX_SPECTRUM_PROFILES, 1u);
+  const uint profileIndex = min(dispatchThreadId.z / cascadeSlots, WATER_MAX_SPECTRUM_PROFILES - 1u);
+  const uint cascadeIndex = dispatchThreadId.z % cascadeSlots;
   const plWaterGpuSpectrumProfile profile = WaterSpectrumProfiles[profileIndex];
-  const uint activeCascadeCount = min(profile.ProfileParams.z, cascadeCount);
-  if (profile.ProfileParams.w == 0u || cascadeIndex >= activeCascadeCount)
+  const uint cascadeCount = min(profile.ProfileParams.z, cascadeSlots);
+  if (profile.ProfileParams.w == 0u || cascadeIndex >= cascadeCount)
   {
-    // Inactive layers are never sampled. Leaving their persistent contents untouched avoids a full-resolution
-    // clear for unused profile slots; newly registered live layers are overwritten in this same dispatch.
+    WaterSpectrumFrequencyA[dispatchThreadId] = 0.0;
+    WaterSpectrumFrequencyB[dispatchThreadId] = 0.0;
     return;
   }
 
-  const float2 uv = (float2(dispatchThreadId.xy) + 0.5) / float2(WaterSimulationSize.xy);
+  // Texel (x, y) holds the wave with index (x, y) for the lower half and (x - N, y - N) for the upper: the layout
+  // an inverse transform expects, with no shift needed afterwards.
+  const int size = int(WaterSimulationSize.x);
+  const int2 texel = int2(dispatchThreadId.xy);
+  const int2 waveIndex = int2(texel.x < size / 2 ? texel.x : texel.x - size, texel.y < size / 2 ? texel.y : texel.y - size);
+
+  const float resolution = float(size);
   const float baseWavelength = max(profile.WaveParams.x, 0.05);
-  const float smallestWavelength = clamp(profile.WaveParams.z, 0.025, baseWavelength);
-  const float domainScale = exp2(float(cascadeIndex) * 2.0);
-  const float domainLength = max(baseWavelength * 4.0 * domainScale, smallestWavelength * 8.0);
-  const float2 windDirection = normalize(profile.WindDirectionSpeedAmplitude.xy + float2(1.0e-5, 0.0));
-  const float windSpeed = max(profile.WindDirectionSpeedAmplitude.z, 0.05);
-  // Cascade contribution is attenuated once by the consumer. Keeping the authored amplitude here avoids
-  // applying the same falloff twice and preserves visible mid/long-scale energy.
-  const float authoredAmplitude = max(profile.WindDirectionSpeedAmplitude.w, 0.0);
-  const uint spectrumMode = profile.ProfileParams.y;
-  const uint componentCount = spectrumMode == 0u ? 4u : (spectrumMode == 1u ? 6u : 8u);
-  const uint cascadeSeed = profile.ProfileParams.x ^ (cascadeIndex * 0x85ebca6bu);
+  const float domainLength = WaterCascadeLength(baseWavelength, float(cascadeIndex), float(cascadeCount));
+  const float bandHigh = WaterCascadeBandHigh(baseWavelength, float(cascadeIndex), float(cascadeCount), resolution);
+  const float bandLow = WaterCascadeBandLow(baseWavelength, float(cascadeIndex), float(cascadeCount), resolution);
+  const uint seed = profile.ProfileParams.x ^ (cascadeIndex * 0x85ebca6bu);
 
-  if (groupThreadIndex < 8u)
-  {
-    const uint component = groupThreadIndex;
-    float weight = 0.0;
-    const float2 periodicWaveVector = SelectPeriodicWaveVector(component, cascadeSeed, windDirection);
-    const float2 direction = normalize(periodicWaveVector);
-    const float waveNumber = 6.2831853 * length(periodicWaveVector) / domainLength;
-    if (component < componentCount)
-    {
-      if (spectrumMode == 1u)
-        weight = WaterPhillipsEnergy(waveNumber, direction, windDirection, windSpeed);
-      else if (spectrumMode == 2u)
-        weight = WaterJonswapEnergy(waveNumber, direction, windDirection, windSpeed, baseWavelength * domainScale);
-      else
-        weight = rcp(1.0 + float(component) * float(component));
-      weight = sqrt(max(weight, 1.0e-10));
-    }
+  const float2 h0 = WaterInitialAmplitude(waveIndex, domainLength, bandLow, bandHigh, profile, seed);
+  const float2 h0Opposite = WaterInitialAmplitude(-waveIndex, domainLength, bandLow, bandHigh, profile, seed);
 
-    s_PeriodicWaveVectors[component] = periodicWaveVector;
-    s_WaveDirections[component] = direction;
-    s_WaveNumbers[component] = waveNumber;
-    s_PhaseOffsets[component] = WaterHash01(cascadeSeed ^ (component * 0xc2b2ae35u)) * 6.2831853;
-    s_AngularFrequencies[component] = sqrt(9.81 * waveNumber);
-    s_ComponentWeights[component] = weight;
-  }
+  const float2 k = float2(waveIndex) * (6.2831853 / domainLength);
+  const float waveNumber = length(k);
+  float s;
+  float c;
+  sincos(sqrt(9.81 * waveNumber) * WaterSimulationTime.x, s, c);
 
-  GroupMemoryBarrierWithGroupSync();
-  if (groupThreadIndex == 0u)
-  {
-    s_ComponentWeightSum = 0.0;
-    [unroll]
-    for (uint component = 0u; component < 8u; ++component)
-      s_ComponentWeightSum += s_ComponentWeights[component];
-  }
-  GroupMemoryBarrierWithGroupSync();
+  // h(k, t) = h0(k) e^(i w t) + conj(h0(-k)) e^(-i w t): a real height field whose waves travel the way they face.
+  const float2 height = ComplexMultiply(h0, float2(c, s)) + ComplexMultiply(float2(h0Opposite.x, -h0Opposite.y), float2(c, -s));
 
-  if (!inBounds)
-    return;
+  const float2 direction = waveNumber > 1.0e-6 ? k / waveNumber : float2(0.0, 0.0);
+  const float2 iHeight = float2(-height.y, height.x);
+  // Horizontal displacement pulls the surface towards the crests: D = -i (k / |k|) h. Slope: grad h = i k h.
+  const float2 displacementX = -iHeight * direction.x;
+  const float2 displacementY = -iHeight * direction.y;
+  const float2 slopeX = iHeight * k.x;
+  const float2 slopeY = iHeight * k.y;
+  // Derivatives of the displacement, for the Jacobian that says where the surface folds: d/dx = i kx.
+  const float2 displacementXX = height * (k.x * direction.x);
+  const float2 displacementYY = height * (k.y * direction.y);
+  const float2 displacementXY = height * (k.y * direction.x);
 
-  float height = 0.0;
-  float2 slope = 0.0;
-  float compression = 0.0;
-  [unroll]
-  for (uint component = 0u; component < 8u; ++component)
-  {
-    if (component >= componentCount)
-      break;
-
-    const float waveNumber = s_WaveNumbers[component];
-    const float2 direction = s_WaveDirections[component];
-    const float phase = dot(uv, s_PeriodicWaveVectors[component]) * 6.2831853 +
-                        WaterSimulationTime.x * s_AngularFrequencies[component] + s_PhaseOffsets[component];
-    float sinePhase;
-    float cosinePhase;
-    sincos(phase, sinePhase, cosinePhase);
-    const float normalizedWeight = s_ComponentWeights[component] / max(s_ComponentWeightSum, 1.0e-6);
-    const float componentAmplitude = authoredAmplitude * normalizedWeight;
-    height += sinePhase * componentAmplitude;
-    slope += cosinePhase * direction * (componentAmplitude * waveNumber);
-    compression += -sinePhase * componentAmplitude * waveNumber * waveNumber;
-  }
-
-  // Surface compression is shared by persistent foam and the projected caustic field. It is intentionally
-  // signed before the final threshold so wave troughs do not produce the same breaking signal as crests.
-  const float breakingThreshold = lerp(0.12, 0.035, saturate(profile.WaveParams.y));
-  const float jacobianFoam = saturate((compression - breakingThreshold) * 8.0 + length(slope) * 0.15);
-  WaterSpectrumOutput[dispatchThreadId] = float4(slope, height, jacobianFoam);
+  WaterSpectrumFrequencyA[dispatchThreadId] = float4(ComplexPack(height, displacementX), ComplexPack(displacementY, slopeX));
+  WaterSpectrumFrequencyB[dispatchThreadId] = float4(ComplexPack(slopeY, displacementXX), ComplexPack(displacementYY, displacementXY));
 }

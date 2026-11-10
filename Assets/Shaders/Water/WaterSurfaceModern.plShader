@@ -49,7 +49,6 @@ WireFrame = true
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 #include <Shaders/Water/WaterSurfaceVertex.h>
 
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
@@ -77,7 +76,30 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   const uint cellIndex = vertexID / 6u;
   const uint vertexInCell = vertexID % 6u;
   const uint2 cell = uint2(cellIndex % cells, cellIndex / cells);
-  float2 uv = float2(cell + quadOffsets[vertexInCell]) / float(cells);
+  uint2 gridIndex = cell + quadOffsets[vertexInCell];
+
+  // Ring seams. The ring outside this one has coarser cells, so along the edge where the two meet this patch has
+  // vertices the other has not, and waves would open a crack at every one of them. Those vertices move along the edge
+  // onto the nearest vertex of the coarser ring: the triangles between collapse, and the two rings share the edge.
+  // plWaterGeometry::SnapOceanSeamIndex is the same rule in C++.
+  const uint seams = GET_PUSH_CONSTANT(plWaterDrawConstants, ProfileParams).w;
+  const uint outerSeamMask = (seams >> 4u) & 0xFu;
+  const uint seamRatio = (seams >> 16u) & 0xFFu;
+  float spacingScale = 1.0;
+  if (outerSeamMask != 0u && seamRatio > 1u)
+  {
+    const bool onWestOrEast = (gridIndex.x == 0u && (outerSeamMask & 1u) != 0u) || (gridIndex.x == cells && (outerSeamMask & 2u) != 0u);
+    const bool onSouthOrNorth = (gridIndex.y == 0u && (outerSeamMask & 4u) != 0u) || (gridIndex.y == cells && (outerSeamMask & 8u) != 0u);
+    if (onWestOrEast)
+      gridIndex.y = ((gridIndex.y + seamRatio / 2u) / seamRatio) * seamRatio;
+    if (onSouthOrNorth)
+      gridIndex.x = ((gridIndex.x + seamRatio / 2u) / seamRatio) * seamRatio;
+    // And they read the waves at the coarser ring's scale, as that ring's own vertices on this edge do.
+    if (onWestOrEast || onSouthOrNorth)
+      spacingScale = float(seamRatio);
+  }
+  // The inner edges of a ring are the outer edges of the ring inside it, whose vertices were just moved here: nothing to do.
+  float2 uv = float2(gridIndex) / float(cells);
   const float4 originAndHeight = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchOriginAndBaseHeight);
   const float4 axisUAndExtent = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchAxisUAndExtent);
   const float4 axisVAndExtent = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchAxisVAndExtent);
@@ -85,14 +107,16 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   baseWorldPosition.z += originAndHeight.w;
   float waveAttenuation = 1.0;
   float2 vertexFlowDirection = float2(1.0, 0.0);
-  float profileBlend = 0.0;
+  // No vertices to carry a profile pair: both indices say "the draw's own".
+  float4 profilePair = float4(0.0, 1.0, 1.0, 1.0);
 #else
+  float spacingScale = 1.0;
   float2 uv = Input.TexCoord0;
   float3 baseWorldPosition = Input.Position;
   float waveAttenuation = saturate(Input.TexCoord1.x);
   const float2 tangentXY = Input.Tangent.xy;
   float2 vertexFlowDirection = dot(tangentXY, tangentXY) > 1.0e-10 ? normalize(tangentXY) : float2(1.0, 0.0);
-  float profileBlend = saturate(Input.Color0.r);
+  float4 profilePair = Input.Color0;
 #endif
 
 #if WATER_USE_TESSELLATION
@@ -104,19 +128,20 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   output.Normal = float3(0.0, 0.0, 1.0);
   output.TexCoord0 = uv;
   output.BaseWorldXY = baseWorldPosition.xy;
-  output.SpectrumFoam = 0.0;
+  // The domain stage has no other way to learn that a vertex lies on a ring seam.
+  output.SpectrumFoam = spacingScale;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
   output.Tangent = float3(vertexFlowDirection, 0.0);
   output.BiTangent = float3(-vertexFlowDirection.y, vertexFlowDirection.x, 0.0);
   output.TexCoord1 = float2(waveAttenuation, 0.0);
-  output.Color0 = float4(profileBlend, 0.0, 0.0, 1.0);
+  output.Color0 = profilePair;
 #endif
 #if CAMERA_MODE == CAMERA_MODE_STEREO
   output.RenderTargetArrayIndex = s_ActiveCameraEyeIndex;
 #endif
   return output;
 #else
-  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profileBlend);
+  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profilePair, spacingScale);
 #endif
 }
 
@@ -136,7 +161,6 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 #include <Shaders/Common/GlobalConstants.h>
 #include <Shaders/Materials/MaterialInterpolator.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 
 struct WaterTessellationFactors
 {
@@ -171,16 +195,7 @@ float WaterEdgeTessellationFactor(VS_OUT a, VS_OUT b)
       factor = max(factor, TessellationParams.z);
   }
 
-  // Current ridges are true displacement, so keep enough local geometry to resolve them even when a large
-  // regular lake triangle spans the mouth. The uniform branch and two analytic fields are substantially cheaper
-  // than tessellating the entire lake to this density.
-  if (distanceToCamera < 64.0)
-  {
-    const float flowInfluence = EvaluateWaterJunctionFlow(midpoint.xy).z;
-    factor = max(factor, ceil(lerp(1.0, min(maxFactor, 4.0), flowInfluence)));
-  }
-
-  // Integral, edge-derived factors match across independently drawn river, junction, and receiving-body edges.
+  // Whole-number factors taken from the edge alone: the two parts of a network that share an edge tessellate it alike.
   return clamp(factor, 1.0, maxFactor);
 }
 
@@ -224,7 +239,6 @@ VS_OUT main(InputPatch<VS_OUT, 3> patch, uint id : SV_OutputControlPointID)
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 #include <Shaders/Water/WaterSurfaceVertex.h>
 
 struct WaterTessellationFactors
@@ -251,17 +265,27 @@ VS_OUT main(WaterTessellationFactors factors, OutputPatch<VS_OUT, 3> patch,
   vertexFlowDirection = dot(vertexFlowDirection, vertexFlowDirection) > 1.0e-10
                           ? normalize(vertexFlowDirection)
                           : float2(1.0, 0.0);
-  const float profileBlend = saturate(patch[0].Color0.r * barycentric.x + patch[1].Color0.r * barycentric.y +
-                                      patch[2].Color0.r * barycentric.z);
+  // The pair is the same at all three corners; only the weight varies across the triangle.
+  const float4 profilePair = float4(saturate(patch[0].Color0.r * barycentric.x + patch[1].Color0.r * barycentric.y +
+                                             patch[2].Color0.r * barycentric.z),
+    patch[0].Color0.gba);
 #else
   const float waveAttenuation = 1.0;
   const float2 vertexFlowDirection = float2(1.0, 0.0);
-  const float profileBlend = 0.0;
+  const float4 profilePair = float4(0.0, 1.0, 1.0, 1.0);
 #endif
 #if CAMERA_MODE == CAMERA_MODE_STEREO
   s_ActiveCameraEyeIndex = patch[0].RenderTargetArrayIndex;
 #endif
-  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profileBlend);
+  // A point of a ring seam lies between two corners that are both on the seam; the third corner's weight is zero there.
+  float spacingScale = 1.0;
+  if (barycentric.x < 1.0e-4)
+    spacingScale = min(patch[1].SpectrumFoam, patch[2].SpectrumFoam);
+  else if (barycentric.y < 1.0e-4)
+    spacingScale = min(patch[2].SpectrumFoam, patch[0].SpectrumFoam);
+  else if (barycentric.z < 1.0e-4)
+    spacingScale = min(patch[0].SpectrumFoam, patch[1].SpectrumFoam);
+  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profilePair, max(spacingScale, 1.0));
 }
 #endif
 
@@ -292,45 +316,118 @@ VS_OUT main(WaterTessellationFactors factors, OutputPatch<VS_OUT, 3> patch,
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
+#include <Shaders/Water/WaterProfile.h>
+#include <Shaders/Water/WaterSpectrumShape.h>
 
 Texture2DArray WaterSceneColor BIND_GROUP(BG_RENDER_PASS);
 Texture2DArray WaterOpaqueDepth BIND_GROUP(BG_RENDER_PASS);
-Texture2D WaterNormalTexture BIND_GROUP(BG_DRAW_CALL);
-Texture2D WaterNormalTextureSecondary BIND_GROUP(BG_DRAW_CALL);
-Texture2D WaterFoamTexture BIND_GROUP(BG_DRAW_CALL);
-Texture2D WaterFoamTextureSecondary BIND_GROUP(BG_DRAW_CALL);
+// The wave spectrum's cascades, as in WaterSurfaceVertex.h. The vertices carry the waves the mesh can show; here the
+// rest of them become normals.
+Texture2DArray WaterSpectrumDisplacement BIND_GROUP(BG_RENDER_PASS);
+Texture2DArray WaterSpectrumSlope BIND_GROUP(BG_RENDER_PASS);
 
-float3 ApplyWaterNormalDetail(float3 baseNormal, float3 worldPosition, float profileBlend, float2 primaryFlow, float2 secondaryFlow)
+// What the spectrum adds to a pixel beyond what its vertices already hold.
+struct WaterSpectrumDetail
+{
+  float2 Gradient; // height gradient of the waves between the vertices
+  float Variance;  // slope variance of the waves smaller than the pixel: they cannot be drawn, only blur the reflection
+  float Fold;      // how far the surface is folded over itself here, 0..1
+};
+
+WaterSpectrumDetail EvaluateWaterSpectrumDetail(plWaterGpuProfile profile, float2 baseWorldXY, uint spectrumLayers)
+{
+  WaterSpectrumDetail detail;
+  detail.Gradient = 0.0;
+  detail.Variance = 0.0;
+  detail.Fold = 0.0;
+
+  const uint cascadeSlots = max(spectrumLayers / 4u, 1u);
+  const uint cascadeCount = spectrumLayers > 0u ? min(min((uint)profile.SpectrumParams.y, cascadeSlots), 4u) : 0u;
+  if (cascadeCount == 0u)
+    return detail;
+
+  const float4 surfaceParams = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams);
+  const float vertexSpacing = max(surfaceParams.y, 0.01);
+  const float resolution = max(surfaceParams.z, 2.0);
+  const uint firstSpectrumLayer = min((uint)profile.SpectrumParams.x, 3u) * cascadeSlots;
+  [unroll]
+  for (uint cascade = 0u; cascade < 4u; ++cascade)
+  {
+    if (cascade >= cascadeCount)
+      break;
+    const float domainLength = WaterCascadeLength(profile.WaveParams.y, float(cascade), float(cascadeCount));
+    const float3 uv = float3(baseWorldXY / domainLength, firstSpectrumLayer + cascade);
+    const float vertexLod = max(log2(vertexSpacing * resolution / domainLength), 0.0);
+
+    // The mip the pixel covers, and the mip its vertices read. Their difference is the detail that lies between the
+    // vertices. Far away the pixel's mip is the coarser one, and the difference takes back what the vertices show of
+    // waves that are smaller than a pixel.
+    const float4 pixelSlope = WaterSpectrumSlope.Sample(LinearSampler, uv);
+    const float4 vertexSlope = WaterSpectrumSlope.SampleLevel(LinearSampler, uv, vertexLod);
+    detail.Gradient += pixelSlope.xy - vertexSlope.xy;
+    // A mip holds the mean of the slopes and the mean of their squares. What is missing between the two is the
+    // variance of the slopes that were averaged away.
+    detail.Variance += max(pixelSlope.z - dot(pixelSlope.xy, pixelSlope.xy), 0.0);
+    detail.Fold = max(detail.Fold, WaterSpectrumDisplacement.Sample(LinearSampler, uv).w);
+  }
+  return detail;
+}
+// One detail normal and one foam texture per draw: the drawing body's. A blend with another profile samples the same
+// pair with that profile's scale and drift.
+Texture2D WaterNormalTexture BIND_GROUP(BG_DRAW_CALL);
+Texture2D WaterFoamTexture BIND_GROUP(BG_DRAW_CALL);
+
+// Flow mapping. A texture that is simply slid along a current tears apart wherever the current turns, and the longer
+// it runs the worse it gets: after ten minutes in a river bend nothing of the pattern is left. Instead the pattern is
+// only ever slid for a few seconds, twice, half a cycle apart, and each copy is faded out before it is reset and the
+// other one shows. The offset never grows, so the pattern looks the same after an hour as after a second.
+float4 SampleWaterAlongFlow(Texture2D tex, float2 uv, float2 uvVelocity, float time)
+{
+  const float cycle = 3.2;
+  const float phase0 = frac(time / cycle);
+  const float phase1 = frac(time / cycle + 0.5);
+  const float weight0 = 1.0 - abs(phase0 * 2.0 - 1.0);
+  const float4 sample0 = tex.Sample(LinearSampler, uv + uvVelocity * ((phase0 - 0.5) * cycle));
+  const float4 sample1 = tex.Sample(LinearSampler, uv + uvVelocity * ((phase1 - 0.5) * cycle) + float2(0.37, 0.61));
+  return lerp(sample1, sample0, weight0);
+}
+
+// One profile's detail normal: two layers of the normal texture at different scales.
+float2 SampleWaterProfileNormalDetail(plWaterGpuProfile profile, float3 worldPosition, float2 flowVelocity, float simulationTime)
+{
+  if (profile.FoamMaterialParams.w <= 0.5)
+    return 0.0;
+
+  const float detailScale = max(profile.SurfaceDetailParams.x, 0.05);
+  float2 detail0;
+  float2 detail1;
+  if (profile.SpectrumParams.w > 0.5)
+  {
+    // A river: the detail travels with the current. A pattern moves against the offset its coordinates are given, so
+    // both layers are offset against the flow.
+    detail0 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.xy * (0.045 * detailScale), -flowVelocity * 0.025, simulationTime).xy * 2.0 - 1.0;
+    detail1 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.yx * (0.083 * detailScale), -flowVelocity.yx * 0.017, simulationTime).xy * 2.0 - 1.0;
+  }
+  else
+  {
+    // A lake or an ocean: one direction of drift everywhere, which can be slid for ever.
+    const float2 uv0 = worldPosition.xy * (0.045 * detailScale) + flowVelocity * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
+    const float2 uv1 = worldPosition.yx * (0.083 * detailScale) - flowVelocity.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
+    detail0 = WaterNormalTexture.Sample(LinearSampler, uv0).xy * 2.0 - 1.0;
+    detail1 = WaterNormalTexture.Sample(LinearSampler, uv1).xy * 2.0 - 1.0;
+  }
+  return (detail0 + detail1 * 0.55) * profile.SurfaceDetailParams.y;
+}
+
+float3 ApplyWaterNormalDetail(float3 baseNormal, float3 worldPosition, plWaterGpuProfile profileA, plWaterGpuProfile profileB,
+  float profileBlend, float2 primaryFlow, float2 secondaryFlow)
 {
   const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
-  const float4 primaryDetailParams = PrimarySurfaceDetailParams;
-  const float primaryDetailScale = max(primaryDetailParams.x, 0.05);
-  float2 primaryDetail = 0.0;
-  if (PrimaryFoamMaterialParams.w > 0.5)
-  {
-    const float2 uv0 = worldPosition.xy * (0.045 * primaryDetailScale) + primaryFlow * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
-    const float2 uv1 = worldPosition.yx * (0.083 * primaryDetailScale) - primaryFlow.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
-    const float2 detail0 = WaterNormalTexture.Sample(LinearSampler, uv0).xy * 2.0 - 1.0;
-    const float2 detail1 = WaterNormalTexture.Sample(LinearSampler, uv1).xy * 2.0 - 1.0;
-    primaryDetail = (detail0 + detail1 * 0.55) * primaryDetailParams.y;
-  }
+  float2 detail = SampleWaterProfileNormalDetail(profileA, worldPosition, primaryFlow, simulationTime);
+  [branch]
+  if (profileBlend > 0.0)
+    detail = lerp(detail, SampleWaterProfileNormalDetail(profileB, worldPosition, secondaryFlow, simulationTime), profileBlend);
 
-  const float4 secondaryDetailParams = SecondarySurfaceDetailParams;
-  const float secondaryDetailScale = max(secondaryDetailParams.x, 0.05);
-  float2 secondaryDetail = 0.0;
-  if (SecondaryFoamMaterialParams.w > 0.5)
-  {
-    // The secondary lake evaluates the same localized current on its own draw, so this remains seam-identical
-    // at profileBlend 1 while allowing the river motion to continue visibly into (or out of) the basin.
-    const float2 secondaryUv0 = worldPosition.xy * (0.045 * secondaryDetailScale) + secondaryFlow * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
-    const float2 secondaryUv1 = worldPosition.yx * (0.083 * secondaryDetailScale) - secondaryFlow.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
-    const float2 secondaryDetail0 = WaterNormalTextureSecondary.Sample(LinearSampler, secondaryUv0).xy * 2.0 - 1.0;
-    const float2 secondaryDetail1 = WaterNormalTextureSecondary.Sample(LinearSampler, secondaryUv1).xy * 2.0 - 1.0;
-    secondaryDetail = (secondaryDetail0 + secondaryDetail1 * 0.55) * secondaryDetailParams.y;
-  }
-
-  const float2 detail = lerp(primaryDetail, secondaryDetail, profileBlend);
   const float distanceFade = saturate(1.0 - length(GetCameraPosition() - worldPosition) / 900.0);
   // Interaction slope is deliberately absent here: ripples are geometry. Adding it per pixel makes a coarse
   // mesh look embossed like a normal map even when its silhouette has not moved.
@@ -346,47 +443,40 @@ float ProceduralWaterFoamBreakup(float2 position, float scale)
     + 0.06 * sin((position.x + position.y) * scale * 5.0952 + 3.1));
 }
 
-float SamplePrimaryWaterFoamBreakup(float3 worldPosition, float simulationTime, float2 primaryFlow)
+// One profile's foam pattern: where foam is thick and where it is thin.
+float SampleWaterProfileFoamBreakup(plWaterGpuProfile profile, float3 worldPosition, float simulationTime, float2 flowVelocity)
 {
-  const float primaryScale = max(abs(PrimaryFoamMaterialParams.y), 0.001);
-  const float2 primaryPosition = worldPosition.xy + primaryFlow * simulationTime + PrimaryWindDirection.xy * simulationTime * 0.15;
-  if (PrimaryFoamMaterialParams.z > 0.5)
+  const float scale = max(abs(profile.FoamMaterialParams.y), 0.001);
+  if (profile.SpectrumParams.w > 0.5 && profile.FoamMaterialParams.z > 0.5)
   {
-    const float primary0 = WaterFoamTexture.Sample(LinearSampler, primaryPosition * primaryScale).r;
-    const float primary1 = WaterFoamTexture.Sample(LinearSampler,
-      primaryPosition.yx * (primaryScale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
-    return saturate(primary0 * 0.62 + primary1 * 0.38);
+    // A river: foam rides the current, flow mapped like the detail normals.
+    const float foam0 = SampleWaterAlongFlow(WaterFoamTexture, worldPosition.xy * scale, -flowVelocity * scale, simulationTime).r;
+    const float foam1 = SampleWaterAlongFlow(WaterFoamTexture, worldPosition.yx * (scale * 0.61), -flowVelocity.yx * (scale * 0.61), simulationTime).r;
+    return saturate(foam0 * 0.62 + foam1 * 0.38);
   }
-  return ProceduralWaterFoamBreakup(primaryPosition, primaryScale);
+
+  const float2 position = worldPosition.xy + flowVelocity * simulationTime + profile.WindAndFlow.xy * simulationTime * 0.15;
+  if (profile.FoamMaterialParams.z > 0.5)
+  {
+    const float foam0 = WaterFoamTexture.Sample(LinearSampler, position * scale).r;
+    const float foam1 = WaterFoamTexture.Sample(LinearSampler,
+      position.yx * (scale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
+    return saturate(foam0 * 0.62 + foam1 * 0.38);
+  }
+  return ProceduralWaterFoamBreakup(position, scale);
 }
 
-float SampleSecondaryWaterFoamBreakup(float3 worldPosition, float simulationTime, float2 secondaryFlow)
+float SampleWaterFoamBreakup(plWaterGpuProfile profileA, plWaterGpuProfile profileB, float3 worldPosition, float profileBlend,
+  float simulationTime, float2 primaryFlow, float2 secondaryFlow)
 {
-  // Mirrors the primary formula using the receiving lake's localized flow so the junction and lake remain
-  // identical at the material endpoint while foam streaks travel in the current direction.
-  const float secondaryScale = max(abs(SecondaryFoamMaterialParams.y), 0.001);
-  const float2 secondaryPosition = worldPosition.xy + secondaryFlow * simulationTime + SecondaryWindAndRefraction.xy * simulationTime * 0.15;
-  if (SecondaryFoamMaterialParams.z > 0.5)
-  {
-    const float secondary0 = WaterFoamTextureSecondary.Sample(LinearSampler, secondaryPosition * secondaryScale).r;
-    const float secondary1 = WaterFoamTextureSecondary.Sample(LinearSampler,
-      secondaryPosition.yx * (secondaryScale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
-    return saturate(secondary0 * 0.62 + secondary1 * 0.38);
-  }
-  return ProceduralWaterFoamBreakup(secondaryPosition, secondaryScale);
-}
-
-float SampleWaterFoamBreakup(float3 worldPosition, float profileBlend, float simulationTime, float2 primaryFlow, float2 secondaryFlow)
-{
-  // Ordinary bodies and exact junction endpoints evaluate one material only. The branches are coherent for a
-  // draw and avoid the other profile's texture reads or procedural sine field.
+  // A body's own water and the pure ends of a mix evaluate one profile only.
   if (profileBlend <= 0.0001)
-    return SamplePrimaryWaterFoamBreakup(worldPosition, simulationTime, primaryFlow);
+    return SampleWaterProfileFoamBreakup(profileA, worldPosition, simulationTime, primaryFlow);
   if (profileBlend >= 0.9999)
-    return SampleSecondaryWaterFoamBreakup(worldPosition, simulationTime, secondaryFlow);
+    return SampleWaterProfileFoamBreakup(profileB, worldPosition, simulationTime, secondaryFlow);
 
-  return lerp(SamplePrimaryWaterFoamBreakup(worldPosition, simulationTime, primaryFlow),
-    SampleSecondaryWaterFoamBreakup(worldPosition, simulationTime, secondaryFlow), profileBlend);
+  return lerp(SampleWaterProfileFoamBreakup(profileA, worldPosition, simulationTime, primaryFlow),
+    SampleWaterProfileFoamBreakup(profileB, worldPosition, simulationTime, secondaryFlow), profileBlend);
 }
 
 // The cutout is evaluated on the UNDISPLACED world position: the boundary is authored in base space and the
@@ -394,22 +484,50 @@ float SampleWaterFoamBreakup(float3 worldPosition, float profileBlend, float sim
 // choppy waves carry pixels across the analytic boundary, discarding surface the patch does not cover.
 bool InsideJunctionCutout(float2 baseWorldXY, float4 cutout, float4 dimensions)
 {
-  if (dimensions.w < 0.5 || dimensions.x <= 0.0)
+  if (dimensions.x <= 0.0)
     return false;
   const float2 direction = dot(cutout.zw, cutout.zw) > 1.0e-10 ? normalize(cutout.zw) : float2(1.0, 0.0);
   const float2 perpendicular = float2(-direction.y, direction.x);
   const float2 delta = baseWorldXY - cutout.xy;
   const float longitudinal = dot(delta, direction);
   const float t = longitudinal / (dimensions.x * 2.0) + 0.5;
-  const float halfWidth = lerp(dimensions.y, dimensions.z, saturate(t));
+  // Up the river the cutout has the river's width. From the river's end it widens as the apron's fan does (the same
+  // easing over the same stretch), so it never reaches past the fan's edge.
+  const float widen = saturate((t - dimensions.w) / max(1.0 - dimensions.w, 1.0e-4));
+  const float halfWidth = lerp(dimensions.y, dimensions.z, widen * widen * (3.0 - 2.0 * widen));
   return t >= 0.0 && t <= 1.0 && abs(dot(delta, perpendicular)) <= halfWidth;
 }
 
+// An ocean patch leaves out the inside of a river's apron, which is drawn after it and covers the same water.
 void RejectJunctionOverlap(float2 baseWorldXY)
 {
+  if (GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w != 0u)
+    return;
   if (InsideJunctionCutout(baseWorldXY, JunctionCutout0, JunctionCutout1) ||
       InsideJunctionCutout(baseWorldXY, JunctionCutout2, JunctionCutout3))
     discard;
+}
+
+// How a profile's detail normals and foam drift: a river's along the mesh's flow direction, a lake's with the pair
+// of scalars its look was tuned against, an ocean's not at all (its wind term is added where the textures are sampled).
+float2 EvaluateWaterDetailVelocity(plWaterGpuProfile profile, float2 flowDirection)
+{
+  return profile.SpectrumParams.w > 0.5 ? flowDirection * (profile.WindAndFlow.z * profile.WindAndFlow.w) : profile.WindAndFlow.zw;
+}
+
+// Where a current runs into waves, the water breaks. How hard depends on both: no current or no waves, no churn.
+float EvaluateWaterMouthFoam(plWaterGpuProfile profileA, plWaterGpuProfile profileB, float profileBlend)
+{
+  const float currentA = profileA.SpectrumParams.w > 0.5 ? abs(profileA.WindAndFlow.z * profileA.WindAndFlow.w) : 0.0;
+  const float currentB = profileB.SpectrumParams.w > 0.5 ? abs(profileB.WindAndFlow.z * profileB.WindAndFlow.w) : 0.0;
+  const float wavesA = profileA.SpectrumParams.w > 0.5 ? 0.0 : max(profileA.WaveParams.x, 0.0) * max(profileA.WaveParams.z, 0.1);
+  const float wavesB = profileB.SpectrumParams.w > 0.5 ? 0.0 : max(profileB.WaveParams.x, 0.0) * max(profileB.WaveParams.z, 0.1);
+  const float currentPush = max(currentA, currentB);
+  const float wavePush = max(wavesA, wavesB);
+  const float pushback = wavePush / max(wavePush + currentPush, 1.0e-4);
+  const float contest = 4.0 * pushback * (1.0 - pushback);
+  const float front = saturate(4.0 * profileBlend * (1.0 - profileBlend));
+  return contest * min((currentPush + wavePush) * 0.25, 1.0) * front * front;
 }
 
 float LoadWaterOpaqueDepth(float2 pixelPosition, uint eyeIndex)
@@ -434,7 +552,7 @@ float2 ProjectWaterWorldToUV(float3 worldPosition, out float projectionValid)
 // tiered bisection samples refine it. Conservative validity weights make the existing probe/sky
 // lighting take over at silhouettes, off-screen rays, rough water, and numerically unstable grazing angles.
 float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDirection, float surfaceLinearDepth,
-  float perceptualRoughness, float noV, uint eyeIndex, out float reflectionValidity)
+  float perceptualRoughness, float noV, uint eyeIndex, float jitter, out float reflectionValidity)
 {
   reflectionValidity = 0.0;
   const float3 cameraForward = normalize(GetCameraDirForwards());
@@ -446,17 +564,20 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
   // The visible water surface is already in front of the opaque depth at the ray origin. Treat the
   // self-intersection offset as the initial front sample so nearby reflectors remain bracketed.
   bool hasFrontSample = true;
-  const uint stepCount = clamp((uint)WaterQualityParams.x, 1u, 6u);
+  const uint stepCount = clamp((uint)WaterQualityParams.x, 1u, 8u);
 
   [unroll]
-  for (uint stepIndex = 0u; stepIndex < 6u; ++stepIndex)
+  for (uint stepIndex = 0u; stepIndex < 8u; ++stepIndex)
   {
     if (stepIndex >= stepCount)
       break;
 
     // Reserve the first tap for near-field reflections, then spread the remaining taps cubically to
     // retain the authored far range with High's four-step budget.
-    const float normalizedStep = stepCount > 1u ? float(stepIndex) / float(stepCount - 1u) : 1.0;
+    // Each pixel starts its steps at a different point between two of them. A handful of fixed steps shows as bands
+    // where every pixel misses the same thin reflector; jittered, the bands become noise that the temporal filter
+    // averages into the reflection.
+    const float normalizedStep = saturate((float(stepIndex) + jitter) / float(stepCount));
     const float traceDistance = 0.08 + maxTraceDistance * normalizedStep * normalizedStep * normalizedStep;
     float projectionValid;
     const float3 projected = ProjectWaterWorldToScreen(worldPosition + reflectionDirection * traceDistance, projectionValid);
@@ -478,7 +599,7 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
       float hitDelta = depthDelta;
 
       // Refine only confirmed crossings. High uses two bisections for its 1440p budget; Ultra uses four.
-      const uint refinementCount = stepCount >= 6u ? 4u : 2u;
+      const uint refinementCount = stepCount >= 8u ? 4u : 2u;
       [unroll]
       for (uint refinement = 0u; refinement < 4u; ++refinement)
       {
@@ -532,6 +653,36 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
   return 0.0;
 }
 
+// How much of the sun reaches a point on the water surface: the engine's shadow map (virtual pages or cascades) and
+// its cloud shadows, looked up at the surface's own world position. Contact shadows are left out on purpose: they
+// are traced from the opaque depth buffer, so on a water pixel they describe the bed below, not the surface.
+float EvaluateWaterSunShadow(float3 worldPosition, float3 surfaceNormal, float3 screenPosition, out float3 out_debugColor)
+{
+  out_debugColor = float3(1.0, 0.0, 1.0); // magenta: the view has no directional light
+  if (BrightestDirectionalLightIndex >= NumLights)
+    return 1.0;
+
+  const plPerLightData lightData = perLightDataBuffer[BrightestDirectionalLightIndex];
+  const uint type = (lightData.colorAndType >> 24) & 0xFF;
+  if (type != LIGHT_TYPE_DIR)
+    return 1.0;
+
+  const float3 lightVector = normalize(RGB10ToFloat3(lightData.direction) * 2.0 - 1.0);
+  out_debugColor = float3(1.0, 1.0, 0.0); // yellow: the sun casts no shadows
+  if (lightData.shadowDataOffsetAndFadeOut == 0)
+    return SampleCloudShadowTerm(worldPosition);
+
+  const float noise = InterleavedGradientNoise(screenPosition.xy);
+  float2 randomAngle;
+  sincos(noise * 2.0 * PI, randomAngle.x, randomAngle.y);
+  const float2x2 randomRotation = {randomAngle.x, -randomAngle.y, randomAngle.y, randomAngle.x};
+  float subsurfaceShadow = 1.0;
+  // Green where the shadow map covers the point, red where it does not (the lookup then answers "lit").
+  const float shadowTerm = saturate(CalculateShadowTerm(worldPosition, surfaceNormal, lightVector, 1.0, type, lightData.shadowDataOffsetAndFadeOut,
+    noise, randomRotation, 1.0, subsurfaceShadow, out_debugColor));
+  return shadowTerm;
+}
+
 void ComputeWaterDepths(PS_IN input, uint eyeIndex, out float surfaceLinearDepth, out float opaqueLinearDepth)
 {
   const float opaqueDepth = LoadWaterOpaqueDepth(input.Position.xy, eyeIndex);
@@ -553,12 +704,10 @@ float main(PS_IN input) : SV_Target0
   s_ActiveCameraEyeIndex = input.RenderTargetArrayIndex;
 #endif
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 1u || geometryType == 2u || geometryType == 5u)
+  if (geometryType == 1u)
     discard;
   const uint4 volumeFilter = GET_PUSH_CONSTANT(plWaterDrawConstants, VolumeFilterParams);
-  const bool belongsToActiveBody = volumeFilter.z == volumeFilter.x ||
-                                   (geometryType == 6u && volumeFilter.z == volumeFilter.y);
-  if (volumeFilter.w == 0u || !belongsToActiveBody)
+  if (volumeFilter.w == 0u || volumeFilter.z != volumeFilter.x)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
   return LinearizeZBufferDepth(input.Position.z);
@@ -575,15 +724,19 @@ struct WaterCausticFieldOutput
 WaterCausticFieldOutput main(PS_IN input)
 {
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 3u || geometryType == 4u || geometryType == 6u)
+  if (geometryType == 3u)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
 
-  float profileBlend = GET_PUSH_CONSTANT(plWaterDrawConstants, FlowAndJunctionBlend).z;
+  uint profileIndexA;
+  uint profileIndexB;
+  float profileBlend = 0.0;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
-  profileBlend = saturate(input.Color0.r);
+  DecodeWaterProfilePair(input.Color0, profileIndexA, profileIndexB, profileBlend);
+#else
+  GetWaterDrawProfilePair(profileIndexA, profileIndexB);
 #endif
-  const float2 causticStrength = max(lerp(CausticParams.xy, CausticParams.zw, profileBlend), 0.0);
+  const float2 causticStrength = max(lerp(LoadWaterProfile(profileIndexA).CausticParams.xy, LoadWaterProfile(profileIndexB).CausticParams.xy, profileBlend), 0.0);
 
   WaterCausticFieldOutput output;
   output.Height = input.WorldPosition.z;
@@ -600,7 +753,7 @@ float main(PS_IN input) : SV_Target0
 #endif
   const uint eyeIndex = s_ActiveCameraEyeIndex;
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 3u || geometryType == 4u || geometryType == 6u)
+  if (geometryType == 3u)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
   float surfaceLinearDepth;
@@ -619,52 +772,56 @@ float4 main(PS_IN input) : SV_Target0
 #endif
   const uint eyeIndex = s_ActiveCameraEyeIndex;
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 3u || geometryType == 4u || geometryType == 6u)
+  if (geometryType == 3u)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
 
-  float profileBlend = GET_PUSH_CONSTANT(plWaterDrawConstants, FlowAndJunctionBlend).z;
+  uint profileIndexA;
+  uint profileIndexB;
+  float profileBlend = 0.0;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
-  profileBlend = saturate(input.Color0.r);
+  DecodeWaterProfilePair(input.Color0, profileIndexA, profileIndexB, profileBlend);
+#else
+  GetWaterDrawProfilePair(profileIndexA, profileIndexB);
 #endif
+  const plWaterGpuProfile profileA = LoadWaterProfile(profileIndexA);
+  const plWaterGpuProfile profileB = LoadWaterProfile(profileIndexB);
 
-  if (geometryType == 5u)
+#if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
+  [branch]
+  if (profileIndexA != profileIndexB && profileBlend > 0.0 && profileBlend < 1.0)
   {
-    // Keep exact endpoint geometry while breaking up the artificial straight cross-profile boundary.
+    // The mix of two waters is not a ramp across the mouth: its front is ragged. The breakup is a function of the
+    // position and the weight alone, so the river's side and the receiver's side of a mouth line agree on it, and it
+    // is nothing where either water is pure. How ragged is the junction's Front Breakup, carried in the vertex alpha.
+    const float frontTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
+    const float2 p = input.BaseWorldXY;
+    const float frontNoise = sin(dot(p, float2(2.1, 1.3)) + frontTime * 0.31) * sin(dot(p, float2(-1.7, 2.9)) - frontTime * 0.23) * 0.6 +
+                             sin(dot(p, float2(5.3, -4.1)) - frontTime * 0.47) * sin(dot(p, float2(3.9, 6.7)) + frontTime * 0.41) * 0.4;
     const float blendInterior = 4.0 * profileBlend * (1.0 - profileBlend);
-    const float blendNoise = sin(input.WorldPosition.x * 0.071) * sin(input.WorldPosition.y * 0.113) * 0.5;
-    profileBlend = smoothstep(0.04, 0.96, saturate(profileBlend + blendNoise * 0.12 * blendInterior));
+    profileBlend = saturate(profileBlend + frontNoise * saturate(input.Color0.a) * 0.45 * blendInterior);
   }
-
-  // Geometry must become 100% lake before the stitched edge, but its material does not: inflowing river water
-  // continues as an analytic tint plume on the lake's own draw. The junction draw is river-primary/lake-secondary,
-  // while the lake draw reverses those profiles. Complementary weights make both draws evaluate the exact same
-  // color and optical material at every shoreline point without overlapping geometry.
-  float materialProfileBlend = profileBlend;
-  const float materialMixStrength = saturate(JunctionMaterialParams.z);
-  if (materialMixStrength > 0.0)
-  {
-    const float materialInfluence = EvaluateWaterJunctionMaterialInfluence(input.BaseWorldXY, JunctionMaterialParams.w);
-    if (geometryType == 5u || geometryType == 6u)
-      materialProfileBlend = profileBlend * (1.0 - materialMixStrength * materialInfluence);
-    else if (geometryType == 2u || geometryType == 4u)
-      materialProfileBlend = materialMixStrength * materialInfluence;
-  }
+#endif
+  const float materialProfileBlend = profileBlend;
 
 #if RENDER_PASS == RENDER_PASS_WIREFRAME
   if (RenderPass == WIREFRAME_RENDER_PASS_MONOCHROME)
     return float4(0.4, 0.4, 0.4, 1.0);
-  return float4(lerp(PrimaryShallowColor.rgb, SecondaryShallowColor.rgb, materialProfileBlend), 1.0);
+  return float4(lerp(profileA.ShallowColor.rgb, profileB.ShallowColor.rgb, materialProfileBlend), 1.0);
 #endif
 
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE && RENDER_PASS == RENDER_PASS_FORWARD
-  // Water.Debug.JunctionPatches: visualize the junction blend gradient (river end = magenta, secondary
-  // end = green). Mode 2 additionally bypasses depth occlusion via the vertex shader. Modes 3+ fall
-  // through to the shading-term visualizations at the end of the shader.
+  // Water.Debug.Stitch (or Water.Debug.JunctionPatches 1): the profile weights on rivers and lakes. A body's own water
+  // is dark blue; where two waters mix, the first of the pair is magenta and the second green. Modes 3+ fall through
+  // to the shading-term views at the end of the shader.
   {
     const uint debugMode = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).z;
-    if ((debugMode == 1u || debugMode == 2u) && geometryType == 5u)
-      return float4(lerp(float3(1.0, 0.0, 1.0), float3(0.0, 1.0, 0.0), saturate(input.Color0.r)), 1.0);
+    if (debugMode == 1u)
+    {
+      if (profileIndexA == profileIndexB)
+        return float4(0.02, 0.05, 0.25, 1.0);
+      return float4(lerp(float3(1.0, 0.0, 1.0), float3(0.0, 1.0, 0.0), profileBlend), 1.0);
+    }
   }
 #endif
 
@@ -676,64 +833,71 @@ float4 main(PS_IN input) : SV_Target0
 
   const float2 uv = input.Position.xy * ViewportSize.zw;
 
-  // FlowAndJunctionBlend.xy packs the SCALAR (flowSpeed, flowScale) pair, never a direction. Rivers and
-  // junction patches carry the authored per-vertex flow direction in the tangent - their detail normals and
-  // foam advect along the actual current. Other bodies keep the legacy scalar-pair drift (oceans have zero
-  // scalars, lake visuals and test baselines were calibrated against it).
-  const float2 flowScalars = GET_PUSH_CONSTANT(plWaterDrawConstants, FlowAndJunctionBlend).xy;
-  float2 primaryFlowVelocity = flowScalars;
-  float2 secondaryFlowVelocity = 0.0;
-  const float3 junctionFlow = (geometryType == 2u || geometryType == 4u || geometryType == 5u || geometryType == 6u)
-                                ? EvaluateWaterJunctionFlow(input.BaseWorldXY)
-                                : 0.0;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
-  if (geometryType == 1u || geometryType == 3u || geometryType == 5u || geometryType == 6u)
-  {
-    const float2 flowTangent = dot(input.Tangent.xy, input.Tangent.xy) > 1.0e-10 ? normalize(input.Tangent.xy) : float2(1.0, 0.0);
-    primaryFlowVelocity = flowTangent * (flowScalars.x * flowScalars.y);
-  }
-  if (geometryType == 2u || geometryType == 4u)
-  {
-    primaryFlowVelocity = flowScalars * (1.0 - junctionFlow.z) + junctionFlow.xy;
-    if (materialMixStrength > 0.0)
-      secondaryFlowVelocity = junctionFlow.xy;
-  }
-  else if (geometryType == 5u || geometryType == 6u)
-  {
-    // Match the receiving body's ordinary draw exactly at profileBlend 1. Dropping its baseline drift here
-    // made the same normal/foam textures slide at different velocities on opposite sides of the stitched edge.
-    secondaryFlowVelocity = JunctionMaterialParams.xy * (1.0 - junctionFlow.z) + junctionFlow.xy;
-  }
+  const float2 flowTangent = dot(input.Tangent.xy, input.Tangent.xy) > 1.0e-10 ? normalize(input.Tangent.xy) : float2(1.0, 0.0);
+#else
+  const float2 flowTangent = float2(1.0, 0.0);
 #endif
+  const float2 primaryFlowVelocity = EvaluateWaterDetailVelocity(profileA, flowTangent);
+  const float2 secondaryFlowVelocity = EvaluateWaterDetailVelocity(profileB, flowTangent);
 
   // Interaction data is deliberately absent from the pixel stage. Its only visible contribution is the
   // displaced vertex position and coherent vertex normal produced above; no atlas-shaped shading is painted
   // over the resulting geometry.
+  // The waves of the spectrum that the mesh is too coarse for. Two profiles mix as their wave fields do in the
+  // vertex stage: with weights whose squares add up to one.
+  const uint spectrumLayers = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).y;
+  WaterSpectrumDetail spectrumDetail = EvaluateWaterSpectrumDetail(profileA, input.BaseWorldXY, spectrumLayers);
+  [branch]
+  if (profileIndexA != profileIndexB && profileBlend > 0.0)
+  {
+    const WaterSpectrumDetail other = EvaluateWaterSpectrumDetail(profileB, input.BaseWorldXY, spectrumLayers);
+    spectrumDetail.Gradient = spectrumDetail.Gradient * sqrt(1.0 - profileBlend) + other.Gradient * sqrt(profileBlend);
+    spectrumDetail.Variance = lerp(spectrumDetail.Variance, other.Variance, profileBlend);
+    spectrumDetail.Fold = lerp(spectrumDetail.Fold, other.Fold, profileBlend);
+  }
+#if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
+  const float pixelWaveAttenuation = saturate(input.TexCoord1.x);
+#else
+  const float pixelWaveAttenuation = 1.0;
+#endif
+  const float3 vertexNormal = normalize(input.Normal);
+  const float2 vertexGradient = -vertexNormal.xy / max(vertexNormal.z, 0.1);
+  const float3 waveNormal = normalize(float3(-(vertexGradient + spectrumDetail.Gradient * pixelWaveAttenuation), 1.0));
+
   const float3 surfaceNormal = ApplyWaterNormalDetail(
-    input.Normal, input.WorldPosition, materialProfileBlend, primaryFlowVelocity, secondaryFlowVelocity);
+    waveNormal, input.WorldPosition, profileA, profileB, materialProfileBlend, primaryFlowVelocity, secondaryFlowVelocity);
   const float3 viewDirection = normalize(GetCameraPosition() - input.WorldPosition);
-  // Thickness is intentionally the full distance to the visible opaque surface. Where no floor geometry
-  // exists the transmittance collapses to zero and the extinction lerp below produces the authored deep
-  // color - the same mechanism that gives the open ocean its color. Clamping this to the authored body
-  // depth makes the water transparent against the void behind it, which renders as black.
+  // The distance from the surface to whatever is behind it, measured along the camera's axis. This is what the depth
+  // buffer gives, and it is only used to get at the two measures that mean something to water: how deep the water is
+  // under the pixel (verticalDepth) and how far the light travels through it (waterPathLength). Where there is no
+  // bed at all, both are very large and the water takes its deep colour.
   const float thickness = max(opaqueLinearDepth - surfaceLinearDepth, 0.0);
-  const float4 absorptionAndRoughness = lerp(PrimaryAbsorptionAndRoughness, SecondaryAbsorptionAndRoughness, materialProfileBlend);
-  const float4 flowAndBlend = GET_PUSH_CONSTANT(plWaterDrawConstants, FlowAndJunctionBlend);
-  const float4 scatteringAndIor = lerp(PrimaryScatteringAndIor, SecondaryScatteringAndIor, materialProfileBlend);
-  const float4 shallowColor = lerp(PrimaryShallowColor, SecondaryShallowColor, materialProfileBlend);
-  const float4 deepColor = lerp(PrimaryDeepColor, SecondaryDeepColor, materialProfileBlend);
-  const float4 opticalParams = lerp(PrimaryOpticalParams, SecondaryOpticalParams, materialProfileBlend);
-  const float4 foamParams = lerp(PrimaryFoamParams, SecondaryFoamParams, materialProfileBlend);
-  const float4 surfaceDetailParams = lerp(PrimarySurfaceDetailParams, SecondarySurfaceDetailParams, materialProfileBlend);
-  const float4 foamMaterialParams = lerp(PrimaryFoamMaterialParams, SecondaryFoamMaterialParams, materialProfileBlend);
-  const float4 foamColor = lerp(PrimaryFoamColor, SecondaryFoamColor, materialProfileBlend);
+  const float4 absorptionAndRoughness = lerp(profileA.AbsorptionAndRoughness, profileB.AbsorptionAndRoughness, materialProfileBlend);
+  const float4 scatteringAndIor = lerp(profileA.ScatteringAndIor, profileB.ScatteringAndIor, materialProfileBlend);
+  const float4 shallowColor = lerp(profileA.ShallowColor, profileB.ShallowColor, materialProfileBlend);
+  const float4 deepColor = lerp(profileA.DeepColor, profileB.DeepColor, materialProfileBlend);
+  const float4 opticalParams = lerp(profileA.OpticalParams, profileB.OpticalParams, materialProfileBlend);
+  const float4 foamParams = lerp(profileA.FoamParams, profileB.FoamParams, materialProfileBlend);
+  const float4 surfaceDetailParams = lerp(profileA.SurfaceDetailParams, profileB.SurfaceDetailParams, materialProfileBlend);
+  const float4 foamMaterialParams = lerp(profileA.FoamMaterialParams, profileB.FoamMaterialParams, materialProfileBlend);
+  const float4 foamColor = lerp(profileA.FoamColor, profileB.FoamColor, materialProfileBlend);
 
   // Always orient the interface normal towards the medium containing the camera. This makes the same
   // double-sided surface valid from air and from water, and gives the refraction calculation the correct
   // relative IOR in each direction.
   // Determine the incident medium from the macro surface, not the high-frequency detail normal: tiny normal-map
   // facets must not flip the camera between air and water at grazing angles.
-  const bool cameraOnNormalSide = dot(normalize(input.Normal), viewDirection) >= 0.0;
+  // The side comes from the triangle itself, not from a normal: far away, where a triangle spans a whole wave, the
+  // interpolated normal of its far slope faces away from the camera although the camera is above the water, and the
+  // pixel was shaded as seen from below. The surface is a height field, so the face normal that points up is its top.
+  float3 faceNormal = cross(ddx(input.WorldPosition), ddy(input.WorldPosition));
+  faceNormal = faceNormal.z >= 0.0 ? faceNormal : -faceNormal;
+  // And only an underwater camera can see the surface from below at all. For a camera in the air the answer is known
+  // without looking at the triangle, which matters where a triangle is seen nearly edge on (the far sea at eye level)
+  // and its face normal is a matter of rounding: such pixels showed the bare sea bed.
+  const bool cameraIsUnderwater = GET_PUSH_CONSTANT(plWaterDrawConstants, VolumeFilterParams).w != 0u;
+  const bool cameraOnNormalSide = !cameraIsUnderwater || dot(faceNormal, viewDirection) >= 0.0;
   const float3 normal = cameraOnNormalSide ? surfaceNormal : -surfaceNormal;
   const float noV = saturate(dot(normal, viewDirection));
   const float ior = max(scatteringAndIor.w, 1.0);
@@ -744,8 +908,16 @@ float4 main(PS_IN input) : SV_Target0
   const float3 incidentDirection = -viewDirection;
   const float3 refractionDirection = EvaluateWaterRefractionDirection(incidentDirection, normal, incidentIor, transmittedIor, noV, cosTransmitted);
 
-  const float refractionStrength = clamp(lerp(flowAndBlend.w, SecondaryWindAndRefraction.z, materialProfileBlend), 0.0, 0.03);
-  const float refractionDepthFade = 1.0 - exp(-thickness / max(opticalParams.z, 0.01));
+  // How deep the water is under this pixel: the drop from the surface to the point of the bed that lies straight
+  // behind it. Over a level bed that is the water's depth from every direction, which the distance along the view ray
+  // is not: measured that way, a shore band was wide from above and thin from the side.
+  const float3 cameraForward = normalize(GetCameraDirForwards());
+  const float incidentForward = max(dot(incidentDirection, cameraForward), 0.05);
+  const float directPathLength = thickness / incidentForward;
+  const float verticalDepth = cameraOnNormalSide ? max(-incidentDirection.z * directPathLength, 0.0) : 0.0;
+
+  const float refractionStrength = clamp(foamParams.w, 0.0, 0.03);
+  const float refractionDepthFade = 1.0 - exp(-verticalDepth / max(opticalParams.z * 0.25, 0.01));
   const float refractionGrazingFade = smoothstep(0.03, 0.2, noV);
   const float edgeDistance = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
   const float refractionEdgeFade = smoothstep(0.0, lerp(0.002, 0.08, saturate(surfaceDetailParams.w)), edgeDistance);
@@ -753,7 +925,6 @@ float4 main(PS_IN input) : SV_Target0
   // Trace the refracted WORLD-SPACE ray to approximately the opaque receiver's view depth, then project it
   // back to screen space. Unlike normal.xy UV offsets this remains correct as the camera rotates and responds
   // to the profile IOR. RefractionDepth caps the trace where extinction has already hidden deeper detail.
-  const float3 cameraForward = normalize(GetCameraDirForwards());
   const float refractedForward = dot(refractionDirection, cameraForward);
   const float traceForwardDepth = min(thickness, max(opticalParams.z * 2.0, 0.25));
   const float traceDistance = traceForwardDepth / max(refractedForward, 0.05);
@@ -775,32 +946,39 @@ float4 main(PS_IN input) : SV_Target0
   const float sceneColorToAbsolute = SceneColorToAbsolute();
   const float3 undistortedSceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb * sceneColorToAbsolute;
   const float3 sceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(refractionUV, eyeIndex), 0).rgb * sceneColorToAbsolute;
-  const float incidentForward = max(dot(incidentDirection, cameraForward), 0.05);
-  const float directPathLength = thickness / incidentForward;
+  // The same two measures for the bed that the refracted ray shows, where there is one on screen.
   const float refractedPathLength = max(candidateOpaqueDepth - surfaceLinearDepth, 0.0) / max(refractedForward, 0.05);
-  // From below, the transmitted ray leaves the water immediately; the underwater composite already applies
-  // extinction between the camera and this interface. Applying the below-surface distance again here would
-  // double-absorb the view of the world above the waterline.
-  const float waterPathLength = cameraOnNormalSide ? lerp(directPathLength, refractedPathLength, refractionValid) : 0.0;
+  const float refractedVerticalDepth = max(-refractionDirection.z * refractedPathLength, 0.0);
+  const float waterDepth = cameraOnNormalSide ? lerp(verticalDepth, refractedVerticalDepth, refractionValid) : 0.0;
+  // Light from the bed comes up through the water along the refracted ray, which is never far from vertical (48
+  // degrees at most): its path is the depth over the ray's vertical share. From below, the transmitted ray leaves the
+  // water at once, and the underwater composite has already applied what lies between the camera and the surface.
+  const float waterPathLength = waterDepth / max(abs(refractionDirection.z), 0.5);
+
+  // One optical model. The profile gives an extinction per metre for each colour and the colour of deep water; what
+  // is seen through the surface is the bed, dimmed by the water above it, plus the water's own colour for as much of
+  // the path as is water. Extinction is fitted to Shallow Color: white sand under Refraction Depth metres of water
+  // looks like it. See plWaterFillGpuProfile.
   const float3 transmittance = exp(-max(absorptionAndRoughness.xyz, 0.0) * waterPathLength);
-  const float tintDepth = saturate(1.0 - exp(-waterPathLength / max(opticalParams.z, 0.01)));
-  const float3 authoredTint = lerp(shallowColor.rgb, deepColor.rgb, tintDepth);
-  const float tintCoverage = saturate(lerp(shallowColor.a, deepColor.a, tintDepth));
   const float3 refractedSceneColor = sceneColor * transmittance;
 
   const float f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
-  const float shoreFoam = pow(1.0 - saturate(thickness / max(foamParams.z, 0.01)), 3.0);
+  // Shore foam: thickest where the water runs out, and beyond that in lines that follow the depth and travel up the
+  // beach, as the last of each wave does. Lines of equal depth are lines along the shore, whatever its shape.
+  const float shoreRamp = 1.0 - saturate(verticalDepth / max(foamParams.z, 0.01));
+  const float lapTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
+  const float lapPhase = verticalDepth / max(foamParams.z, 0.01) * 9.0 + lapTime * 0.9 + sin(dot(input.BaseWorldXY, float2(0.37, 0.23))) * 1.3;
+  const float lapLines = pow(saturate(sin(lapPhase) * 0.5 + 0.5), 6.0);
+  const float shoreFoam = saturate(pow(shoreRamp, 3.0) + lapLines * shoreRamp * 0.6);
   const float crestFoam = saturate((foamParams.y - surfaceNormal.z) / max(foamParams.y * 0.35, 0.02));
-  const float spectralFoam = saturate(input.SpectrumFoam);
+  const float spectralFoam = saturate(max(input.SpectrumFoam, spectrumDetail.Fold * pixelWaveAttenuation));
   // River mouth churn: where the outflowing current and the incoming waves contest each other the water
   // breaks into foam. The strength is precomputed from the two bodies' energies (zero when either side is
   // calm) and the band peaks at the blend front, which the energy balance has already positioned.
   float mouthFoam = 0.0;
-  if (geometryType == 5u)
-  {
-    const float front = saturate(4.0 * profileBlend * (1.0 - profileBlend));
-    mouthFoam = JunctionSpillParams.z * front * front;
-  }
+  [branch]
+  if (profileIndexA != profileIndexB)
+    mouthFoam = EvaluateWaterMouthFoam(profileA, profileB, profileBlend);
   const float breakingFoam = max(crestFoam, spectralFoam);
   const float unbrokenBaseFoam = max(max(shoreFoam, breakingFoam), mouthFoam);
   float baseFoam = 0.0;
@@ -809,15 +987,21 @@ float4 main(PS_IN input) : SV_Target0
   {
     const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
     const float breakup = SampleWaterFoamBreakup(
-      input.WorldPosition, materialProfileBlend, simulationTime, primaryFlowVelocity, secondaryFlowVelocity);
+      profileA, profileB, input.WorldPosition, materialProfileBlend, simulationTime, primaryFlowVelocity, secondaryFlowVelocity);
     baseFoam = unbrokenBaseFoam * smoothstep(0.2, 0.8, breakup);
   }
   const float foam = saturate(baseFoam * max(foamParams.x, 0.0));
 
   const float slopeVariance = saturate(length(fwidth(normal.xy)) * 3.0);
-  const float perceptualRoughness = saturate(max(absorptionAndRoughness.w, 0.025) + slopeVariance * 0.35);
+  // Waves smaller than the pixel cannot be drawn as normals. What they do to a reflection is spread it, and that is
+  // what roughness is: the variance of their slopes is added to the squared GGX alpha.
+  const float baseRoughness = saturate(max(absorptionAndRoughness.w, 0.025) + slopeVariance * 0.35);
+  const float baseAlpha = baseRoughness * baseRoughness;
+  const float perceptualRoughness = saturate(sqrt(sqrt(baseAlpha * baseAlpha + min(spectrumDetail.Variance * pixelWaveAttenuation, 0.25))));
   plMaterialData materialData = (plMaterialData)0;
   materialData.worldPosition = input.WorldPosition;
+  // The engine's lights look their shadows up here. Left at zero, every water pixel took the shadow of the world origin.
+  materialData.shadowPosition = input.WorldPosition;
   materialData.worldNormal = normal;
   materialData.vertexNormal = cameraOnNormalSide ? normalize(input.Normal) : -normalize(input.Normal);
   materialData.diffuseColor = foamColor.rgb;
@@ -827,45 +1011,71 @@ float4 main(PS_IN input) : SV_Target0
   materialData.occlusion = 1.0;
   materialData.opacity = 1.0;
   const plPerClusterData clusterData = GetClusterData(input.Position.xyw);
-  // A directional light is a delta source in the clustered renderer. At water's very low authored roughness,
-  // evaluating that source without a finite angular / pixel footprint creates tens or hundreds of HDR units in
-  // one lobe and bloom turns it into a large glowing patch. Apply specular AA only to direct lights; reflections
-  // retain the authored roughness and therefore keep their crisp detail.
-  const float directPerceptualRoughness = max(perceptualRoughness, 0.20);
+  // Direct light uses the surface's own roughness, which by now holds the slopes of every wave smaller than the pixel:
+  // that is what gives the sun's reflection its width, wide and soft far away and a narrow sparkle up close. (A fixed
+  // floor of 0.2 stood in for it before, and turned every glint into a glowing patch.) The floor that is left only
+  // keeps a mirror-flat surface from collapsing the sun into a single pixel of unbounded radiance.
+  const float directPerceptualRoughness = max(perceptualRoughness, 0.06);
   plMaterialData directMaterialData = materialData;
   directMaterialData.perceptualRoughness = directPerceptualRoughness;
   directMaterialData.roughness = directPerceptualRoughness * directPerceptualRoughness;
   const AccumulatedLight engineLighting = CalculateLightingDirectOnly(directMaterialData, clusterData, input.Position.xyw, false);
 
-  // The authored profile colors are albedo-like values, not radiance - adding them raw makes water pitch
-  // black next to sun-lit geometry in an HDR scene. The clustered lighting result cannot provide the
-  // irradiance either: screen-space and virtual shadow maps derive from the opaque depth buffer and report
-  // water as fully shadowed. Light the tint analytically instead: dominant directional light (unshadowed)
-  // plus sky irradiance.
+  // The sun on water: its light, and whether it gets here. The engine's shadow map is looked up at the surface's own
+  // position, so a cliff, a bridge or a cloud shades the water under it.
   const float3 mainLightVector = MainLightDirection.xyz;
   const float mainLightLengthSquared = dot(mainLightVector, mainLightVector);
   const float mainLightSignal = dot(max(MainLightColorIntensity.rgb, 0.0), float3(0.2126, 0.7152, 0.0722));
   const float mainLightValid = step(1.0e-6, mainLightLengthSquared) * step(1.0e-6, mainLightSignal);
   const float3 mainLightDirection = mainLightVector * rsqrt(max(mainLightLengthSquared, 1.0e-6));
-  const float noL = saturate(dot(normal, mainLightDirection)) * mainLightValid;
-  const float3 sunIrradiance = MainLightColorIntensity.rgb * noL * INV_PI;
+  float3 sunShadowCoverage;
+  const float sunShadow = mainLightValid > 0.0 ? EvaluateWaterSunShadow(input.WorldPosition, float3(0.0, 0.0, 1.0), input.Position.xyw, sunShadowCoverage) : 1.0;
+  const float3 sunRadiance = MainLightColorIntensity.rgb * (mainLightValid * sunShadow);
+
+  // What lights the surface (foam), and what lights the water below it. The water's own colour is light scattered
+  // back out of its depth, which does not follow every ripple: it takes the light that falls on the level surface.
+  const float noL = saturate(dot(normal, mainLightDirection));
   const float3 ambientIrradiance = EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, normal).rgb;
-  const float3 diffuseIrradiance = sunIrradiance + ambientIrradiance;
-  const float lightingSignal = dot(diffuseIrradiance, float3(0.2126, 0.7152, 0.0722));
+  const float3 diffuseIrradiance = sunRadiance * noL * INV_PI + ambientIrradiance;
+  const float3 levelNormal = cameraOnNormalSide ? float3(0.0, 0.0, 1.0) : float3(0.0, 0.0, -1.0);
+  const float3 volumeIrradiance = sunRadiance * saturate(mainLightDirection.z) * INV_PI + EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, levelNormal).rgb;
+  const float lightingSignal = dot(volumeIrradiance, float3(0.2126, 0.7152, 0.0722));
   const float missingLighting = 1.0 - smoothstep(0.002, 0.04, lightingSignal);
   // Some valid scenes intentionally have no sun, sky light, or reflection probe. Preserve a restrained amount of
   // radiance from the pre-water scene and a small neutral floor so deep water remains legible instead of becoming
   // mathematically black. The fallback fades away as soon as real irradiance is available.
-  const float3 lowEnergySceneFallback = max(undistortedSceneColor * 0.06, float3(0.006, 0.008, 0.01)) + authoredTint * 0.035;
-  const float3 litTint = authoredTint * diffuseIrradiance + lowEnergySceneFallback * missingLighting;
-  const float3 litInScattering = max(scatteringAndIor.xyz, 0.0) * (1.0 - transmittance) * diffuseIrradiance;
-  // The depth ramp brings ShallowColor in over the first RefractionDepth meters while the very edge of a
-  // shore stays transparent; physical extinction alone leaves all shallow water colorless.
-  const float3 transmittedColor = lerp(refractedSceneColor + litInScattering, litTint, tintDepth * 0.8 * tintCoverage);
+  const float3 lowEnergySceneFallback = max(undistortedSceneColor * 0.06, float3(0.006, 0.008, 0.01)) + deepColor.rgb * 0.035;
+  const float3 volumeColor = deepColor.rgb * volumeIrradiance + lowEnergySceneFallback * missingLighting;
+
+  // Light that enters the back of a wave and comes out of its face: the green glow of a crest seen against the sun.
+  // It needs the sun behind the wave and a view through the wave's thin top, which the surface normal bends towards.
+  const float3 crestLightDirection = normalize(mainLightDirection + normal * 0.35);
+  const float crestThrough = pow(saturate(dot(viewDirection, -crestLightDirection)), 4.0);
+  const float crestThin = saturate(1.0 - vertexNormal.z) * 4.0 + saturate(spectrumDetail.Fold);
+  const float3 crestScattering = lerp(deepColor.rgb, shallowColor.rgb, 0.6) * sunRadiance * INV_PI * (crestThrough * saturate(crestThin) * (cameraOnNormalSide ? 1.0 : 0.0));
+
+  const float3 transmittedColor = refractedSceneColor + volumeColor * (1.0 - transmittance) + crestScattering;
+  // For the debug views: the water's own colour before light, and with it.
+  const float3 authoredTint = lerp(shallowColor.rgb, deepColor.rgb, saturate(1.0 - dot(transmittance, float3(0.333, 0.333, 0.334))));
+  const float3 litTint = volumeColor * (1.0 - transmittance);
 
   const float3 environmentBrdf = EnvironmentBRDF(materialData.specularColor, materialData.roughness, noV);
   // Water selects one indirect reflection source explicitly; clustered lighting above is direct-only.
-  const float3 probeRadiance = ComputeReflection(materialData, viewDirection, clusterData, input.Position.xyw);
+  // The probe is asked for the sky a rough sea shows, not for its mirror image. A wave field reflects the sky from
+  // well above the horizon on average: slopes that would show the horizon itself are hidden behind the waves in front
+  // of them. And a probe's horizon is the worst of it, a blur of sky with whatever lies below, which in a sky-light
+  // probe is the bare ground without any water on it. So the direction is lifted, more the rougher the surface is.
+  plMaterialData reflectionMaterialData = materialData;
+  if (cameraOnNormalSide)
+  {
+    float3 r = reflect(-viewDirection, normal);
+    if (r.z < 0.0)
+      r.z = -r.z * 0.5;
+    r.z = max(r.z, 0.2 + perceptualRoughness * 0.6);
+    r = normalize(r);
+    reflectionMaterialData.worldNormal = normalize(r + viewDirection);
+  }
+  const float3 probeRadiance = ComputeReflection(reflectionMaterialData, viewDirection, clusterData, input.Position.xyw);
   const float3 giSpecularRadiance = SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * GISpecularStrength;
   const float giSpecularValid = (GIForwardEnabled != 0 && GIForwardReflectionsEnabled != 0) ? 1.0 : 0.0;
   const float3 stableEnvironmentRadiance = lerp(probeRadiance, giSpecularRadiance, giSpecularValid);
@@ -873,32 +1083,32 @@ float4 main(PS_IN input) : SV_Target0
   // more reflected radiance than arrives at the interface.
   const float reflectionStrength = saturate(opticalParams.x);
   const float environmentReflectionWeight = reflectionStrength * saturate(opticalParams.y);
-  const float3 reflectionDirection = reflect(-viewDirection, normal);
+  float3 reflectionDirection = reflect(-viewDirection, normal);
+  // A ray that leaves a wave downwards meets water again, and what it shows in the end is sky from lower down, not
+  // the ground half of a probe. Without a second bounce, the ray is turned back up: seen from above, far water near
+  // the horizon reflected the probe's floor as a brown band.
+  if (cameraOnNormalSide && reflectionDirection.z < 0.0)
+    reflectionDirection = normalize(float3(reflectionDirection.xy, -reflectionDirection.z * 0.5 + 0.02));
   float ssrValidity = 0.0;
   float3 ssrRadiance = 0.0;
 #if WATER_USE_SSR
   [branch]
   if (environmentReflectionWeight > 1.0e-4)
     ssrRadiance = TraceWaterScreenSpaceReflection(input.WorldPosition, reflectionDirection, surfaceLinearDepth,
-      perceptualRoughness, noV, eyeIndex, ssrValidity);
+      perceptualRoughness, noV, eyeIndex, InterleavedGradientNoise(input.Position.xy), ssrValidity);
 #endif
   // A valid water-aware SSR hit replaces the stable probe / GI source before BRDF weighting. Reflection
   // sources are selected, never accumulated, so a bright sky cannot be counted by multiple systems.
   const float3 resolvedEnvironmentRadiance = lerp(stableEnvironmentRadiance, ssrRadiance, ssrValidity);
   const float3 resolvedEnvironmentReflection = resolvedEnvironmentRadiance * environmentBrdf;
-  // Clustered specular can be fully shadowed because water is absent from the opaque depth buffer. Keep ordinary
-  // local-light specular, but evaluate the authored dominant-sun glitter explicitly so SunGlitterStrength remains
-  // responsive. Use the same energy-conserving GGX BRDF as the rest of the renderer rather than a separately
-  // normalized Phong lobe. The direct-light roughness floor approximates the finite solar disk plus the pixel
-  // footprint, preventing a calm surface from collapsing the sun into an unstable HDR impulse.
-  const float glitterStrength = 1.0 - exp(-max(surfaceDetailParams.z, 0.0));
+  // The sun's reflection. The engine's lights give it too, with contact shadows that were traced for the bed and not
+  // for the surface, so the sun is evaluated here with its own shadow and the larger of the two is taken: both are the
+  // same lobe, and the engine's stays in charge of every other light. Sun Glitter Strength is an artist's dimmer:
+  // 0.5 and above is the sun as it is.
+  const float glitterStrength = saturate(surfaceDetailParams.z * 2.0);
   const AccumulatedLight glitterBrdf = DefaultShading(directMaterialData, mainLightDirection, viewDirection);
-  const float3 analyticSunGlitter = MainLightColorIntensity.rgb * glitterBrdf.specularLight * INV_PI *
-    reflectionStrength * mainLightValid;
-  // Clustered lighting remains authoritative when its dominant-light lobe is valid. The analytic lobe only
-  // replaces a missing / weaker result over transparent water; taking the maximum avoids adding the same sun
-  // twice while retaining glitter where opaque-depth shadows incorrectly suppress the water surface.
-  const float3 directReflection = max(engineLighting.specularLight * reflectionStrength, analyticSunGlitter * glitterStrength);
+  const float3 analyticSunGlitter = sunRadiance * glitterBrdf.specularLight * INV_PI * reflectionStrength;
+  const float3 directReflection = max(engineLighting.specularLight * reflectionStrength * sunShadow, analyticSunGlitter * glitterStrength);
   float3 reflectionLighting = directReflection + resolvedEnvironmentReflection * environmentReflectionWeight;
 
   // When a world has neither a SkyLight nor a reflection probe, the engine reflection result is black.
@@ -931,11 +1141,11 @@ float4 main(PS_IN input) : SV_Target0
       if (debugMode == 7u)
         return float4(authoredTint, 1.0);
       if (debugMode == 8u)
-        return float4(PrimaryDeepColor.rgb, 1.0); // raw CB read, no blend
+        return float4(profileA.DeepColor.rgb, 1.0); // first profile of the pair, no blend
       if (debugMode == 9u)
-        return float4(SecondaryDeepColor.rgb, 1.0); // raw CB read, no blend
+        return float4(profileB.DeepColor.rgb, 1.0); // second profile of the pair, no blend
       if (debugMode == 10u)
-        return float4(SecondaryScatteringAndIor.rgb * 4.0, 1.0); // raw CB read, scaled for visibility
+        return float4(profileB.ScatteringAndIor.rgb * 4.0, 1.0); // second profile of the pair, scaled for visibility
       if (debugMode == 11u)
         return float4(input.Normal * 0.5 + 0.5, 1.0);
       if (debugMode == 12u)
@@ -944,7 +1154,16 @@ float4 main(PS_IN input) : SV_Target0
         return float4(diffuseIrradiance * 0.2, 1.0); // analytic irradiance (scaled)
       if (debugMode == 14u)
         return float4(litTint, 1.0); // authored tint after lighting
-      return float4(MainLightColorIntensity.rgb * 0.1, 1.0); // 15+: raw main light (scaled)
+      if (debugMode == 15u)
+        return float4(MainLightColorIntensity.rgb * 0.1, 1.0); // raw main light (scaled)
+      if (debugMode == 16u || debugMode == 17u)
+      {
+        // 16: the sun's shadow at the water surface (white is lit). 17: whether the shadow map covers the surface.
+        float3 coverage;
+        const float sunShadow = EvaluateWaterSunShadow(input.WorldPosition, float3(0.0, 0.0, 1.0), input.Position.xyw, coverage);
+        return float4(debugMode == 16u ? sunShadow.xxx : coverage, 1.0);
+      }
+      return float4(PreExpose(engineLighting.specularLight), 1.0); // 18+: the engine's direct specular
     }
   }
 #endif
@@ -965,13 +1184,18 @@ float4 main(PS_IN input) : SV_Target0
   foamBrdfMaterial.perceptualRoughness = foamPerceptualRoughness;
   foamBrdfMaterial.roughness = foamPerceptualRoughness * foamPerceptualRoughness;
   const AccumulatedLight foamSunBrdf = DefaultShading(foamBrdfMaterial, mainLightDirection, viewDirection);
-  const float3 foamSunSpecular = MainLightColorIntensity.rgb * foamSunBrdf.specularLight * INV_PI * mainLightValid;
+  const float3 foamSunSpecular = sunRadiance * foamSunBrdf.specularLight * INV_PI;
   const float3 foamLighting = foamDiffuseLighting + foamSunSpecular + lowEnergySceneFallback * missingLighting;
   // Interpret the foam signal as optical density rather than a linear color weight. Thin aerated crests become
   // visible without driving established white water past full coverage, where the exponential naturally saturates.
   const float foamCoverage = 1.0 - exp(-foam * 2.5);
   color = lerp(color, foamLighting, foamCoverage * saturate(foamColor.a));
-  const float shoreVisibility = opticalParams.w > 0.0001 ? smoothstep(0.0, opticalParams.w, thickness) : 1.0;
+  // Shallow water is clear, and it is still water: its surface reflects whatever its depth. (The old shore fade
+  // blended the whole surface away over Shore Fade Depth along the view ray, so from above a metre of water over sand
+  // was not there at all.) All that is faded is the last few centimetres, where the surface meets the ground and a
+  // hard line would show the mesh.
+  const float softEdgeDepth = clamp(opticalParams.w * 0.05, 0.01, 0.15);
+  const float shoreVisibility = cameraOnNormalSide ? smoothstep(0.0, softEdgeDepth, verticalDepth) : 1.0;
   color = lerp(undistortedSceneColor, color, shoreVisibility);
 
 #if RENDER_PASS == RENDER_PASS_EDITOR

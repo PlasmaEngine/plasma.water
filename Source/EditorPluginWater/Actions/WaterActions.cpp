@@ -704,31 +704,24 @@ namespace
     const bool bHasSurface = sSource.FindSubString("plWaterSurfacePass") != nullptr;
     const bool bHasUnderwater = sSource.FindSubString("plWaterUnderwaterPass") != nullptr;
 
-    if (bHasSurface && bHasUnderwater)
+    // The water passes are placed by the engine: the plugin registers them when it loads, and every pipeline with a
+    // transparent pass gets them (plRenderPipelineInjections). A pipeline asset needs no water nodes at all.
+    if (!bHasSurface && !bHasUnderwater)
     {
       plEditorUiServices::MessageBoxInformation(
-        plFmt("Water pipeline inspection passed for '{}'. Water surface and underwater composition passes are present. No changes were needed.", sPipelinePath));
+        plFmt("'{}' holds no water nodes, which is how it should be: the engine adds the water passes to every pipeline that has a transparent pass. Nothing to do.\n\nIf water is not drawn, look in the log for a line about the injection 'plasma.water/Surface', and check that the cvar Rendering.Pipeline.Injections is on.", sPipelinePath));
       return;
     }
 
-    plStringBuilder sMissing;
-    if (!bHasSurface)
-      sMissing.Append("plWaterSurfacePass");
-    if (!bHasUnderwater)
-    {
-      if (!sMissing.IsEmpty())
-        sMissing.Append(", ");
-      sMissing.Append("plWaterUnderwaterPass");
-    }
-
-    plEditorUiServices::MessageBoxWarning(plFmt(
-      "The active pipeline is missing {} or uses an unrecognized custom topology. The conservative assistant did not duplicate, edit, transform, or save the asset. "
-      "The pipeline will be opened so the connections can be reviewed explicitly.",
-      sMissing));
+    // Nodes from before that (package 1.3 and earlier) keep working: where a pipeline already holds a water pass, the
+    // engine adds none of its own. What they do not get is the Water.Quality setting; their Quality property is used.
+    plEditorUiServices::MessageBoxInformation(plFmt(
+      "'{}' holds hand-placed water nodes ({}{}{}). They keep working, with the Quality set on the node.\n\nTo let the engine place the passes instead (and use the Water.Quality setting), delete those nodes and reconnect what they were wired between. The pipeline will be opened; nothing has been changed.",
+      sPipelinePath, bHasSurface ? "plWaterSurfacePass" : "", bHasSurface && bHasUnderwater ? ", " : "", bHasUnderwater ? "plWaterUnderwaterPass" : ""));
     plEditorApp::GetSingleton()->OpenDocumentQueued(sPipelinePath);
 
     if (pDocument != nullptr)
-      pDocument->ShowDocumentStatus("Water pipeline requires manual review; no asset changes were made.");
+      pDocument->ShowDocumentStatus("The render pipeline holds hand-placed water nodes; no asset changes were made.");
   }
 } // namespace
 

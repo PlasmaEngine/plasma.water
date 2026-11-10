@@ -1,149 +1,136 @@
 #pragma once
 
+#include <Shaders/Water/WaterProfile.h>
+#include <Shaders/Water/WaterSpectrumShape.h>
+
+// The wave spectrum's cascades, one layer per profile slot and cascade, with mips (see WaterSpectrumAssemble.plShader).
 Texture2DArray WaterSpectrumDisplacement BIND_GROUP(BG_RENDER_PASS);
+Texture2DArray WaterSpectrumSlope BIND_GROUP(BG_RENDER_PASS);
 Texture2DArray WaterInteractionAtlas BIND_GROUP(BG_RENDER_PASS);
 
-// Evaluates every source of geometric water displacement at an arbitrary base-space point. The fallback
-// vertex path calls this once per authored vertex; the tessellated path calls it for every domain point.
-VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float waveAttenuation,
-  float2 vertexFlowDirection, float profileBlend)
+// What one profile's waves do to a point of the undisplaced surface.
+struct WaterWaveField
 {
-  const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  const float4 waveParams = GET_PUSH_CONSTANT(plWaterDrawConstants, WaveParams);
-  const float4 flowAndBlend = GET_PUSH_CONSTANT(plWaterDrawConstants, FlowAndJunctionBlend);
-  const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
+  float3 Offset;       // displacement of the point
+  float2 Gradient;     // height gradient: the normal is normalize(-Gradient, 1)
+  float Foam;          // spectrum fold foam, 0..1
+  float RippleCeiling; // largest interaction ripple height this profile allows (m)
+};
+
+WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseWorldPosition, float waveAttenuation,
+  float2 vertexFlowDirection, float2 ribbonCoordinates, float simulationTime, uint spectrumLayers, float vertexSpacing)
+{
+  const float4 waveParams = profile.WaveParams;
+  // A river's waves live in the river's own coordinates: metres along it and metres across. They run downstream and
+  // travel with the current, and because "along" follows the river, their crests stay square to the flow through
+  // every bend. (In world space, with the flow direction of each vertex as the wave direction, the waves of a bend
+  // all but vanished.) Lakes and oceans run with their wind in world space and do not advect.
+  const bool usesVertexFlow = profile.SpectrumParams.w > 0.5;
+  const float2 waveDirection = usesVertexFlow ? float2(1.0, 0.0) : profile.WindAndFlow.xy;
+  const float2 wavePosition = usesVertexFlow ? float2(ribbonCoordinates.x - profile.WindAndFlow.z * profile.WindAndFlow.w * simulationTime, ribbonCoordinates.y) : baseWorldPosition.xy;
+
+  const uint cascadeSlots = max(spectrumLayers / 4u, 1u);
+  const uint cascadeCount = spectrumLayers > 0u ? min(min((uint)profile.SpectrumParams.y, cascadeSlots), 4u) : 0u;
+  // With a spectrum, the four deterministic swells give half their height to it: they are what gameplay queries
+  // follow, and on their own they are too regular to pass for a sea. plWaterSpectrum::s_fBaseWaveShare in C++.
+  const float baseShare = cascadeCount > 0u ? 0.5 : 1.0;
 
   float3 waveOffset;
   float3 waveNormal;
-  // Rivers and junction patches carry an authored per-vertex flow direction; flowAndBlend.xy packs the
-  // scalar (flowSpeed, flowScale) pair and must never be used as a direction. Lakes and oceans do not advect.
-  const bool usesVertexFlow = geometryType == 1u || geometryType == 3u || geometryType == 5u || geometryType == 6u;
-  const float2 authoredWindDirection = PrimaryWindDirection.xy;
-  const float2 waveDirection = usesVertexFlow ? vertexFlowDirection : authoredWindDirection;
-  const float2 flowVelocity = usesVertexFlow ? vertexFlowDirection * (flowAndBlend.x * flowAndBlend.y) : float2(0.0, 0.0);
-  const float2 waveSamplePosition = baseWorldPosition.xy + flowVelocity * simulationTime;
-  EvaluateWaterGerstner(waveSamplePosition, simulationTime, waveParams.x * waveAttenuation, waveParams.y,
-    waveParams.z, waveParams.w, waveDirection, waveOffset, waveNormal);
-  float spectrumFoam = 0.0;
+  EvaluateWaterGerstner(wavePosition, simulationTime, waveParams.x * baseShare * waveAttenuation,
+    waveParams.y, waveParams.z, waveParams.w, waveDirection, waveOffset, waveNormal);
 
-  if (geometryType == 5u || geometryType == 6u)
+  WaterWaveField field;
+  field.Offset = waveOffset;
+  field.Gradient = -waveNormal.xy / max(waveNormal.z, 0.1);
+  if (usesVertexFlow)
   {
-    const float4 secondaryWaveParams = SecondaryWaveParams;
-    const float2 secondaryWind = SecondaryWindAndRefraction.xy;
-    float3 secondaryOffset;
-    float3 secondaryNormal;
-    EvaluateWaterGerstner(baseWorldPosition.xy, simulationTime, secondaryWaveParams.x * waveAttenuation,
-      secondaryWaveParams.y, secondaryWaveParams.z, secondaryWaveParams.w, secondaryWind, secondaryOffset,
-      secondaryNormal);
-    waveOffset = lerp(waveOffset, secondaryOffset, profileBlend);
-    waveNormal = normalize(lerp(waveNormal, secondaryNormal, profileBlend));
+    // From the river's coordinates back to the world: "along" is the flow direction here, "across" is to its left.
+    const float2 acrossDirection = float2(-vertexFlowDirection.y, vertexFlowDirection.x);
+    field.Offset.xy = vertexFlowDirection * waveOffset.x + acrossDirection * waveOffset.y;
+    field.Gradient = vertexFlowDirection * field.Gradient.x + acrossDirection * field.Gradient.y;
   }
+  field.Foam = 0.0;
+  field.RippleCeiling = profile.SpectrumParams.z > 0.0 ? profile.SpectrumParams.z : max(waveParams.x * 2.0, 0.5);
+
+  if (waveAttenuation > 0.0 && cascadeCount > 0u)
+  {
+    const float resolution = max(GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).z, 2.0);
+    const uint firstSpectrumLayer = min((uint)profile.SpectrumParams.x, 3u) * cascadeSlots;
+    [unroll]
+    for (uint cascade = 0u; cascade < 4u; ++cascade)
+    {
+      if (cascade >= cascadeCount)
+        break;
+      const float domainLength = WaterCascadeLength(waveParams.y, float(cascade), float(cascadeCount));
+      const float2 spectrumUV = baseWorldPosition.xy / domainLength;
+      // A vertex stands for the water between it and its neighbours: it reads the mip whose texels are that far apart.
+      // Waves shorter than the mesh can show are left to the pixel shader, which adds them as normals.
+      const float lod = max(log2(vertexSpacing * resolution / domainLength), 0.0);
+      const float4 displacement = WaterSpectrumDisplacement.SampleLevel(LinearSampler, float3(spectrumUV, firstSpectrumLayer + cascade), lod);
+      const float4 slope = WaterSpectrumSlope.SampleLevel(LinearSampler, float3(spectrumUV, firstSpectrumLayer + cascade), lod);
+      field.Offset += displacement.xyz * waveAttenuation;
+      field.Gradient += slope.xy * waveAttenuation;
+      field.Foam = max(field.Foam, displacement.w);
+    }
+  }
+
+  return field;
+}
+
+// Evaluates every source of geometric water displacement at an arbitrary base-space point. The fallback
+// vertex path calls this once per authored vertex; the tessellated path calls it for every domain point.
+// profilePair is the vertex colour of a finite mesh (see DecodeWaterProfilePair); a procedural patch passes
+// float4(0, 1, 1, 1), which selects the draw's own profile.
+// spacingScale is one, except on the edge an ocean ring shares with the coarser ring outside it: there the vertices
+// of both rings have to read the waves at the coarser ring's scale, or the same point would be moved to two places.
+VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float waveAttenuation,
+  float2 vertexFlowDirection, float4 profilePair, float spacingScale)
+{
+  const float vertexSpacing = max(GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).y, 0.01) * max(spacingScale, 1.0);
+  const uint spectrumLayers = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).y;
+  const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
+
+  uint profileIndexA;
+  uint profileIndexB;
+  float profileBlend;
+  DecodeWaterProfilePair(profilePair, profileIndexA, profileIndexB, profileBlend);
+
+  WaterWaveField field = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexA), baseWorldPosition, waveAttenuation,
+    vertexFlowDirection, uv, simulationTime, spectrumLayers, vertexSpacing);
+  [branch]
+  if (profileBlend > 0.0 && profileIndexB != profileIndexA)
+  {
+    const WaterWaveField other = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexB), baseWorldPosition, waveAttenuation,
+      vertexFlowDirection, uv, simulationTime, spectrumLayers, vertexSpacing);
+    // Two wave fields that have nothing to do with each other: a plain cross-fade would leave the water flattest
+    // where they are mixed half and half. Weights whose squares add up to one keep the wave energy level across the mix.
+    const float weightA = sqrt(1.0 - profileBlend);
+    const float weightB = sqrt(profileBlend);
+    field.Offset = field.Offset * weightA + other.Offset * weightB;
+    field.Gradient = field.Gradient * weightA + other.Gradient * weightB;
+    field.Foam = lerp(field.Foam, other.Foam, profileBlend);
+    field.RippleCeiling = lerp(field.RippleCeiling, other.RippleCeiling, profileBlend);
+  }
+
+  float3 waveOffset = field.Offset;
+  float3 waveNormal = normalize(float3(-field.Gradient, 1.0));
 
   if (waveAttenuation > 0.0)
   {
-    const uint spectrumLayers = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).y;
-    if (spectrumLayers > 0u)
-    {
-      const float4 surfaceParams = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams);
-      const uint availableCascadeCount = max(spectrumLayers / 4u, 1u);
-      const uint cascadeCount = min(min((uint)surfaceParams.z, availableCascadeCount), 4u);
-      const uint profileSlot = min((uint)surfaceParams.w, 3u);
-      const uint firstSpectrumLayer = profileSlot * availableCascadeCount;
-      float4 spectral = 0.0;
-      float spectralWeight = 0.0;
-      float spectralFoamWeight = 0.0;
-      [unroll]
-      for (uint cascade = 0u; cascade < 4u; ++cascade)
-      {
-        if (cascade >= cascadeCount || firstSpectrumLayer + cascade >= spectrumLayers)
-          break;
-        const float cascadeDomainScale = exp2(float(cascade) * 2.0);
-        const float2 spectrumUV = baseWorldPosition.xy / max(waveParams.y * 4.0 * cascadeDomainScale, 1.0);
-        const float4 cascadeSample = WaterSpectrumDisplacement.SampleLevel(
-          LinearSampler, float3(spectrumUV, firstSpectrumLayer + cascade), 0);
-        const float cascadeWeight = 1.0 / exp2(float(cascade));
-        spectral += cascadeSample * cascadeWeight;
-        spectralWeight += cascadeWeight;
-        spectralFoamWeight += cascadeSample.w * cascadeWeight;
-      }
-      spectral /= max(spectralWeight, 1.0);
-      spectrumFoam = spectralFoamWeight / max(spectralWeight, 1.0);
-      // Spectrum XY stores slope, never horizontal position. Applying it as position folds the surface.
-      waveOffset.z += spectral.z * waveAttenuation;
-      const float2 analyticGradient = -waveNormal.xy / max(waveNormal.z, 0.1);
-      waveNormal = normalize(float3(-(analyticGradient + spectral.xy * waveAttenuation), 1.0));
-    }
-
-    if ((geometryType == 5u || geometryType == 6u) && profileBlend > 0.0 && spectrumLayers > 0u)
-    {
-      const uint secondaryCascadeCount = min((uint)JunctionSpillParams.y, 4u);
-      if (secondaryCascadeCount > 0u)
-      {
-        const uint availableCascadeCount = max(spectrumLayers / 4u, 1u);
-        const uint secondarySlot = min((uint)JunctionSpillParams.x, 3u);
-        const uint firstSecondaryLayer = secondarySlot * availableCascadeCount;
-        float4 secondarySpectral = 0.0;
-        float secondarySpectralWeight = 0.0;
-        float secondaryFoamWeight = 0.0;
-        [unroll]
-        for (uint cascade = 0u; cascade < 4u; ++cascade)
-        {
-          if (cascade >= secondaryCascadeCount || firstSecondaryLayer + cascade >= spectrumLayers)
-            break;
-          const float cascadeDomainScale = exp2(float(cascade) * 2.0);
-          const float2 spectrumUV = baseWorldPosition.xy / max(SecondaryWaveParams.y * 4.0 * cascadeDomainScale, 1.0);
-          const float4 cascadeSample = WaterSpectrumDisplacement.SampleLevel(
-            LinearSampler, float3(spectrumUV, firstSecondaryLayer + cascade), 0);
-          const float cascadeWeight = 1.0 / exp2(float(cascade));
-          secondarySpectral += cascadeSample * cascadeWeight;
-          secondarySpectralWeight += cascadeWeight;
-          secondaryFoamWeight += cascadeSample.w * cascadeWeight;
-        }
-        secondarySpectral /= max(secondarySpectralWeight, 1.0);
-        const float secondarySpectrumFoam = secondaryFoamWeight / max(secondarySpectralWeight, 1.0);
-        const float secondaryInfluence = waveAttenuation * profileBlend;
-        waveOffset.z += secondarySpectral.z * secondaryInfluence;
-        const float2 analyticGradient = -waveNormal.xy / max(waveNormal.z, 0.1);
-        waveNormal = normalize(float3(-(analyticGradient + secondarySpectral.xy * secondaryInfluence), 1.0));
-        spectrumFoam = lerp(spectrumFoam, secondarySpectrumFoam, profileBlend);
-      }
-    }
-
     float4 interaction = 0.0;
     if (InteractionWindowParams.w > 0.5)
       interaction = SampleWaterInteraction(WaterInteractionAtlas, baseWorldPosition.xy, InteractionWindowParams);
     if (!all(abs(interaction) < 1024.0))
       interaction = 0.0;
 
-    const float rippleCeiling = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).y;
-    float maxInteractionHeight = rippleCeiling > 0.0 ? rippleCeiling : max(waveParams.x * 2.0, 0.5);
-    if (geometryType == 5u || geometryType == 6u)
-    {
-      const float secondaryCeiling = JunctionSpillParams.w;
-      const float secondaryHeight = secondaryCeiling > 0.0
-                                      ? secondaryCeiling
-                                      : max(SecondaryWaveParams.x * 2.0, 0.5);
-      maxInteractionHeight = lerp(maxInteractionHeight, secondaryHeight, profileBlend);
-    }
-    interaction.x = clamp(interaction.x, -maxInteractionHeight, maxInteractionHeight);
+    interaction.x = clamp(interaction.x, -field.RippleCeiling, field.RippleCeiling);
     const float2 interactionGradient = DecodeWaterInteractionGradient(interaction);
 
     // Interactions remain a height-field deformation. Shifting vertices laterally by opposing ring gradients
     // can invert adjacent triangles; the resulting vertical fans were previously mistaken for tessellation.
     waveOffset.z += interaction.x * waveAttenuation;
     waveNormal = normalize(waveNormal + float3(-interactionGradient, 0.0) * waveAttenuation);
-
-    // Continue the signed river current across the topology bridge and onto the lake's own mesh. The field is
-    // compact and zero on every boundary, so this adds real moving geometry without opening a new junction seam.
-    if (geometryType == 2u || geometryType == 4u || geometryType == 5u || geometryType == 6u)
-    {
-      float currentHeight;
-      float2 currentGradient;
-      EvaluateWaterJunctionCurrentRipples(baseWorldPosition.xy, simulationTime, currentHeight, currentGradient);
-      waveOffset.z += currentHeight * waveAttenuation;
-      const float2 analyticGradient = -waveNormal.xy / max(waveNormal.z, 0.1);
-      waveNormal = normalize(float3(-(analyticGradient + currentGradient * waveAttenuation), 1.0));
-    }
   }
 
   VS_OUT output = (VS_OUT)0;
@@ -151,19 +138,12 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   output.Normal = waveNormal;
   output.TexCoord0 = uv;
   output.BaseWorldXY = baseWorldPosition.xy;
-  output.SpectrumFoam = saturate(spectrumFoam) * waveAttenuation;
+  output.SpectrumFoam = saturate(field.Foam) * waveAttenuation;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
-  float2 outputFlowDirection = vertexFlowDirection;
-  if (geometryType == 2u || geometryType == 4u || geometryType == 5u || geometryType == 6u)
-  {
-    const float2 junctionVelocity = EvaluateWaterJunctionFlow(baseWorldPosition.xy).xy;
-    if (dot(junctionVelocity, junctionVelocity) > 1.0e-10)
-      outputFlowDirection = normalize(junctionVelocity);
-  }
-  output.Tangent = float3(outputFlowDirection, 0.0);
-  output.BiTangent = float3(-outputFlowDirection.y, outputFlowDirection.x, 0.0);
+  output.Tangent = float3(vertexFlowDirection, 0.0);
+  output.BiTangent = float3(-vertexFlowDirection.y, vertexFlowDirection.x, 0.0);
   output.TexCoord1 = float2(waveAttenuation, 0.0);
-  output.Color0 = float4(profileBlend, 0.0, 0.0, 1.0);
+  output.Color0 = profilePair;
 #endif
 #if WATER_RENDER_PASS == WATER_RENDER_PASS_CAUSTIC_FIELD
   const float2 fieldPosition = (output.WorldPosition.xy - WaterCausticFieldCenterAndExtent.xy) *
@@ -171,10 +151,6 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   output.Position = float4(fieldPosition.x, -fieldPosition.y, 0.5, 1.0);
 #else
   output.Position = mul(GetWorldToScreenMatrix(), float4(output.WorldPosition, 1.0));
-#endif
-#if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE && RENDER_PASS == RENDER_PASS_FORWARD
-  if (GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).z >= 2u && geometryType == 5u)
-    output.Position.z = 0.0001 * output.Position.w;
 #endif
 #if CAMERA_MODE == CAMERA_MODE_STEREO
   output.RenderTargetArrayIndex = s_ActiveCameraEyeIndex;

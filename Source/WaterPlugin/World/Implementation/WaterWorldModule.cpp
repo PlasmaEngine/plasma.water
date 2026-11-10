@@ -10,11 +10,16 @@
 #include <WaterPlugin/Components/OceanComponent.h>
 #include <WaterPlugin/World/WaterWorldModule.h>
 
+#include <Shaders/Water/WaterProfileData.h>
+#include <WaterPlugin/Utils/WaterNetworkMesher.h>
+
 plCVarBool cvar_WaterDebugShowBodies("Water.Debug.ShowBodies", false, plCVarFlags::Default, "Shows authored water surface topology.");
 plCVarBool cvar_WaterDebugShowLod("Water.Debug.ShowLod", false, plCVarFlags::Default, "Shows water patch and clipmap LOD information.");
 plCVarBool cvar_WaterDebugShowFlow("Water.Debug.ShowFlow", false, plCVarFlags::Default, "Shows deterministic river flow vectors.");
 plCVarBool cvar_WaterDebugShowJunctions("Water.Debug.ShowJunctions", false, plCVarFlags::Default, "Shows water attachment anchors and blend radii.");
 plCVarBool cvar_WaterDebugShowInteractions("Water.Debug.ShowInteractions", false, plCVarFlags::Default, "Shows recent splash and wake events, faded by age.");
+plCVarBool cvar_WaterDebugStitch("Water.Debug.Stitch", false, plCVarFlags::Default,
+  "Shows how rivers, lakes and the ocean are stitched: mouth lines with their shared vertex counts, junctions that were left out, and the profile weights on the water itself.");
 plCVarBool cvar_WaterDebugShowUnderwaterVolumes("Water.Debug.ShowUnderwaterVolumes", false, plCVarFlags::Default, "Shows finite underwater proxy bounds.");
 
 // clang-format off
@@ -26,12 +31,12 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 
 namespace
 {
-  constexpr plUInt32 s_uiMaximumFiniteWaterVertices = 262144;
+  constexpr plUInt32 s_uiMaximumFiniteMeshVertices = 262144;
   constexpr plUInt32 s_uiMaximumFiniteWaterIndices = 3145728;
 
   bool ValidateFiniteWaterTopology(plArrayPtr<const plWaterGeometryVertex> vertices, plArrayPtr<const plUInt32> indices)
   {
-    if (vertices.IsEmpty() || indices.IsEmpty() || vertices.GetCount() > s_uiMaximumFiniteWaterVertices ||
+    if (vertices.IsEmpty() || indices.IsEmpty() || vertices.GetCount() > s_uiMaximumFiniteMeshVertices ||
         indices.GetCount() > s_uiMaximumFiniteWaterIndices || indices.GetCount() % 3 != 0)
       return false;
 
@@ -69,113 +74,6 @@ namespace
   {
     const float fLengthSquared = value.GetLengthSquared();
     return fLengthSquared > plMath::SmallEpsilon<float>() ? value / plMath::Sqrt(fLengthSquared) : fallback;
-  }
-
-  struct BoundaryEdge
-  {
-    plUInt32 m_uiA = plInvalidIndex;
-    plUInt32 m_uiB = plInvalidIndex;
-    plUInt8 m_uiUseCount = 0;
-  };
-
-  plUInt64 MakeUndirectedEdgeKey(plUInt32 a, plUInt32 b)
-  {
-    const plUInt32 lo = plMath::Min(a, b);
-    const plUInt32 hi = plMath::Max(a, b);
-    return (static_cast<plUInt64>(lo) << 32) | hi;
-  }
-
-  /// Extracts the single manifold perimeter of a triangulated finite-water surface. The returned vertex indices
-  /// reference the source mesh directly, allowing a junction strip to duplicate the exact shoreline attributes.
-  bool BuildBoundaryLoop(plArrayPtr<const plWaterGeometryVertex> vertices, plArrayPtr<const plUInt32> indices,
-    plDynamicArray<plUInt32>& out_loop)
-  {
-    out_loop.Clear();
-    if (vertices.GetCount() < 3 || indices.GetCount() < 3 || indices.GetCount() % 3 != 0)
-      return false;
-
-    plHashTable<plUInt64, BoundaryEdge> edges;
-    edges.Reserve(indices.GetCount());
-    for (plUInt32 i = 0; i < indices.GetCount(); i += 3)
-    {
-      const plUInt32 triangle[3] = {indices[i], indices[i + 1], indices[i + 2]};
-      for (plUInt32 edgeIndex = 0; edgeIndex < 3; ++edgeIndex)
-      {
-        const plUInt32 a = triangle[edgeIndex];
-        const plUInt32 b = triangle[(edgeIndex + 1) % 3];
-        if (a >= vertices.GetCount() || b >= vertices.GetCount() || a == b)
-          return false;
-
-        const plUInt64 key = MakeUndirectedEdgeKey(a, b);
-        BoundaryEdge edge;
-        if (edges.TryGetValue(key, edge))
-        {
-          ++edge.m_uiUseCount;
-          edges[key] = edge;
-        }
-        else
-        {
-          edge.m_uiA = a;
-          edge.m_uiB = b;
-          edge.m_uiUseCount = 1;
-          edges.Insert(key, edge);
-        }
-      }
-    }
-
-    plDynamicArray<plUInt32> neighborA;
-    plDynamicArray<plUInt32> neighborB;
-    neighborA.SetCount(vertices.GetCount());
-    neighborB.SetCount(vertices.GetCount());
-    for (plUInt32 i = 0; i < vertices.GetCount(); ++i)
-    {
-      neighborA[i] = plInvalidIndex;
-      neighborB[i] = plInvalidIndex;
-    }
-
-    auto AddNeighbor = [&](plUInt32 vertex, plUInt32 neighbor) -> bool
-    {
-      if (neighborA[vertex] == plInvalidIndex)
-        neighborA[vertex] = neighbor;
-      else if (neighborB[vertex] == plInvalidIndex && neighborA[vertex] != neighbor)
-        neighborB[vertex] = neighbor;
-      else
-        return false;
-      return true;
-    };
-
-    plUInt32 uiStart = plInvalidIndex;
-    plUInt32 uiBoundaryEdgeCount = 0;
-    for (auto it = edges.GetIterator(); it.IsValid(); ++it)
-    {
-      const BoundaryEdge& edge = it.Value();
-      if (edge.m_uiUseCount > 2)
-        return false;
-      if (edge.m_uiUseCount != 1)
-        continue;
-      if (!AddNeighbor(edge.m_uiA, edge.m_uiB) || !AddNeighbor(edge.m_uiB, edge.m_uiA))
-        return false;
-      uiStart = edge.m_uiA;
-      ++uiBoundaryEdgeCount;
-    }
-    if (uiStart == plInvalidIndex)
-      return false;
-
-    plUInt32 uiPrevious = plInvalidIndex;
-    plUInt32 uiCurrent = uiStart;
-    for (plUInt32 guard = 0; guard <= vertices.GetCount(); ++guard)
-    {
-      out_loop.PushBack(uiCurrent);
-      const plUInt32 uiNext = neighborA[uiCurrent] != uiPrevious ? neighborA[uiCurrent] : neighborB[uiCurrent];
-      if (uiNext == plInvalidIndex)
-        return false;
-      uiPrevious = uiCurrent;
-      uiCurrent = uiNext;
-      if (uiCurrent == uiStart)
-        return out_loop.GetCount() >= 3 && out_loop.GetCount() == uiBoundaryEdgeCount;
-    }
-
-    return false;
   }
 
   float EvaluateJunctionFlowInfluence(const plWaterJunctionRenderSnapshot& junction, const plVec2& position)
@@ -232,7 +130,9 @@ namespace
       mesh.SetTangent(i, tangent.GetAsVec4(1.0f));
       mesh.SetTexCoord0(i, source.m_vTexCoord);
       mesh.SetTexCoord1(i, plVec2(source.m_fWaveAttenuation, source.m_fDepth));
-      mesh.SetColor0(i, plColorLinearUB(plColor(source.m_fProfileBlend, 0.0f, 0.0f, 1.0f)));
+      // (weight of the second profile, first profile, second profile): see DecodeWaterProfilePair in WaterProfile.h.
+      mesh.SetColor0(i, plColorLinearUB(plMath::ColorFloatToByte(plMath::Saturate(source.m_fProfileBlend)), source.m_uiProfileA, source.m_uiProfileB,
+                          plMath::ColorFloatToByte(plMath::Saturate(source.m_fFrontBreakup))));
     }
     for (plUInt32 i = 0; i < indices.GetCount(); i += 3)
       mesh.SetTriangleIndices(i / 3, indices[i], indices[i + 1], indices[i + 2]);
@@ -242,106 +142,6 @@ namespace
     return plResourceManager::CreateResource<plMeshBufferResource>(resourceName, std::move(mesh), resourceName);
   }
 
-  bool BuildFiniteWaterVolume(plArrayPtr<const plWaterGeometryVertex> surfaceVertices, plArrayPtr<const plUInt32> surfaceIndices,
-    float fDefaultDepth, plDynamicArray<plWaterGeometryVertex>& out_vertices, plDynamicArray<plUInt32>& out_indices,
-    bool bStructuredGrid = false, plArrayPtr<const plVec3> authoredBoundary = {})
-  {
-    out_vertices.Clear();
-    out_indices.Clear();
-    if (!ValidateFiniteWaterTopology(surfaceVertices, surfaceIndices))
-      return false;
-
-    const plUInt32 uiSurfaceVertexCount = surfaceVertices.GetCount();
-    const plUInt64 uiVolumeVertexCapacity = static_cast<plUInt64>(uiSurfaceVertexCount) * 2 + authoredBoundary.GetCount() * 2ull;
-    const plUInt64 uiBaseVolumeIndexCapacity = static_cast<plUInt64>(surfaceIndices.GetCount()) * 2;
-    if (uiVolumeVertexCapacity > s_uiMaximumFiniteWaterVertices * 2ull || uiBaseVolumeIndexCapacity > s_uiMaximumFiniteWaterIndices * 2ull)
-      return false;
-
-    out_vertices.Reserve(static_cast<plUInt32>(uiVolumeVertexCapacity));
-    out_vertices.PushBackRange(surfaceVertices);
-    for (const plWaterGeometryVertex& source : surfaceVertices)
-    {
-      plWaterGeometryVertex bottom = source;
-      bottom.m_vPosition.z -= source.m_fDepth > 0.0f ? source.m_fDepth : plMath::Max(fDefaultDepth, 0.01f);
-      bottom.m_vFlow = plVec3::MakeZero();
-      bottom.m_fWaveAttenuation = 0.0f;
-      out_vertices.PushBack(bottom);
-    }
-
-    // Reserve only the known top and bottom. Side storage is proportional to the explicit perimeter below.
-    out_indices.Reserve(static_cast<plUInt32>(uiBaseVolumeIndexCapacity));
-    for (plUInt32 i = 0; i + 2 < surfaceIndices.GetCount(); i += 3)
-    {
-      const plUInt32 a = surfaceIndices[i], b = surfaceIndices[i + 1], c = surfaceIndices[i + 2];
-      out_indices.PushBack(a);
-      out_indices.PushBack(b);
-      out_indices.PushBack(c);
-      out_indices.PushBack(a + uiSurfaceVertexCount);
-      out_indices.PushBack(c + uiSurfaceVertexCount);
-      out_indices.PushBack(b + uiSurfaceVertexCount);
-
-    }
-
-    auto EmitIndexedSide = [&](plUInt32 a, plUInt32 b)
-    {
-      out_indices.PushBack(a);
-      out_indices.PushBack(a + uiSurfaceVertexCount);
-      out_indices.PushBack(b);
-      out_indices.PushBack(b);
-      out_indices.PushBack(a + uiSurfaceVertexCount);
-      out_indices.PushBack(b + uiSurfaceVertexCount);
-    };
-
-    if (bStructuredGrid)
-    {
-      plUInt32 uiColumns = 1;
-      const float fFirstLongitudinal = surfaceVertices[0].m_vTexCoord.x;
-      while (uiColumns < uiSurfaceVertexCount &&
-             plMath::Abs(surfaceVertices[uiColumns].m_vTexCoord.x - fFirstLongitudinal) < 0.0001f)
-        ++uiColumns;
-      if (uiColumns < 2 || uiSurfaceVertexCount % uiColumns != 0)
-        return false;
-
-      const plUInt32 uiRows = uiSurfaceVertexCount / uiColumns;
-      for (plUInt32 column = 0; column + 1 < uiColumns; ++column)
-      {
-        EmitIndexedSide(column + 1, column);
-        const plUInt32 lastRow = (uiRows - 1) * uiColumns;
-        EmitIndexedSide(lastRow + column, lastRow + column + 1);
-      }
-      for (plUInt32 row = 0; row + 1 < uiRows; ++row)
-      {
-        EmitIndexedSide(row * uiColumns, (row + 1) * uiColumns);
-        EmitIndexedSide((row + 1) * uiColumns + uiColumns - 1, row * uiColumns + uiColumns - 1);
-      }
-    }
-    else if (authoredBoundary.GetCount() >= 3)
-    {
-      const plUInt32 uiSideVertexOffset = out_vertices.GetCount();
-      for (const plVec3& position : authoredBoundary)
-      {
-        plWaterGeometryVertex top;
-        top.m_vPosition = position;
-        top.m_fWaveAttenuation = 0.0f;
-        top.m_fDepth = plMath::Max(fDefaultDepth, 0.01f);
-        out_vertices.PushBack(top);
-        plWaterGeometryVertex bottom = top;
-        bottom.m_vPosition.z -= top.m_fDepth;
-        out_vertices.PushBack(bottom);
-      }
-      for (plUInt32 i = 0; i < authoredBoundary.GetCount(); ++i)
-      {
-        const plUInt32 next = (i + 1) % authoredBoundary.GetCount();
-        const plUInt32 aTop = uiSideVertexOffset + i * 2;
-        const plUInt32 aBottom = aTop + 1;
-        const plUInt32 bTop = uiSideVertexOffset + next * 2;
-        const plUInt32 bBottom = bTop + 1;
-        out_indices.PushBack(aTop); out_indices.PushBack(aBottom); out_indices.PushBack(bTop);
-        out_indices.PushBack(bTop); out_indices.PushBack(aBottom); out_indices.PushBack(bBottom);
-      }
-    }
-    return true;
-  }
 } // namespace
 
 plWaterWorldModule::plWaterWorldModule(plWorld* pWorld)
@@ -384,9 +184,10 @@ void plWaterWorldModule::Update(const plWorldModule::UpdateContext& context)
 
     // Profile resources can be hot-reloaded without touching the component. Refresh immutable body snapshots when
     // their resource changes so editor previews and running worlds see profile edits immediately.
-    bool bRebuildJunctions = false;
-    for (BodySlot& slot : m_Bodies)
+    plHybridArray<plUInt32, 8> reloaded;
+    for (plUInt32 uiBody = 0; uiBody < m_Bodies.GetCount(); ++uiBody)
     {
+      BodySlot& slot = m_Bodies[uiBody];
       if (!slot.m_bInUse || !slot.m_Data.m_Descriptor.m_hProfile.IsValid())
         continue;
 
@@ -395,27 +196,36 @@ void plWaterWorldModule::Update(const plWorldModule::UpdateContext& context)
         continue;
 
       const plWaterBodyDescriptor descriptor = slot.m_Data.m_Descriptor;
-      BodySlot candidate;
-      candidate.m_bInUse = true;
-      candidate.m_uiGeneration = slot.m_uiGeneration;
-      candidate.m_Data.m_BodyId = slot.m_Data.m_BodyId;
-      candidate.m_Data.m_uiGeometryRevision = slot.m_Data.m_uiGeometryRevision;
-      PrepareBody(candidate, descriptor);
-      if (descriptor.m_Type == plWaterBodyType::Ocean || candidate.m_Data.m_bGeometryValid)
-      {
-        slot.m_Data = std::move(candidate.m_Data);
-        bRebuildJunctions = true;
-      }
-      else
-        slot.m_Data.m_uiProfileChangeCounter = profile->GetCurrentResourceChangeCounter();
+      const plWaterBodyId bodyId = slot.m_Data.m_BodyId;
+      PrepareBody(slot, descriptor);
+      slot.m_Data.m_BodyId = bodyId;
+      // PrepareBody blocks until the profile is loaded, so the counter it stored is the one just compared against.
+      slot.m_Data.m_uiProfileChangeCounter = profile->GetCurrentResourceChangeCounter();
+      reloaded.PushBack(uiBody);
     }
-    if (bRebuildJunctions)
+    // The mesh settings, mix lengths and mouth weights all come from profiles.
+    for (plUInt32 uiBody : reloaded)
+      RebuildNetworksAround(uiBody);
+
+    // Bodies that changed since the last update get their draft: one for however many changes there were.
+    if (!m_BodiesAwaitingDraft.IsEmpty())
     {
-      for (JunctionSlot& junction : m_Junctions)
+      plHybridArray<plUInt32, 16> seeds;
+      for (plUInt32 uiBody : m_BodiesAwaitingDraft)
       {
-        if (junction.m_bInUse)
-          PrepareJunction(junction);
+        seeds.PushBack(uiBody);
+        CollectJunctionNeighbours(uiBody, seeds);
       }
+      m_BodiesAwaitingDraft.Clear();
+      RebuildDraftNow(seeds);
+    }
+
+    // Drafts that have been left alone for a moment are replaced by the full meshes.
+    if (!m_BodiesAwaitingFullMeshes.IsEmpty() && (wallClockNow - m_LastDraftTime).GetSeconds() >= s_fDraftSettleSeconds)
+    {
+      const plHybridArray<plUInt32, 8> settled = m_BodiesAwaitingFullMeshes;
+      m_BodiesAwaitingFullMeshes.Clear();
+      RebuildNetworks(settled);
     }
   }
 
@@ -499,7 +309,7 @@ void plWaterWorldModule::DrawDebug() const
     }
   }
 
-  if (cvar_WaterDebugShowJunctions || cvar_WaterDebugShowFlow)
+  if (cvar_WaterDebugShowJunctions || cvar_WaterDebugShowFlow || cvar_WaterDebugStitch)
   {
     for (const JunctionSlot& slot : m_Junctions)
     {
@@ -511,13 +321,34 @@ void plWaterWorldModule::DrawDebug() const
         plDebugRenderer::DrawLines(GetWorld(), plMakeArrayPtr(&line, 1), plColor::Yellow);
         plDebugRenderer::DrawLineSphere(GetWorld(),
           plBoundingSphere::MakeFromCenterAndRadius(slot.m_Data.m_vCenter, slot.m_Data.m_fBlendDistance), plColor::Yellow);
-        if (slot.m_RenderData.m_uiStitchedLakeVertexCount >= 2)
+      }
+
+      if ((cvar_WaterDebugShowJunctions || cvar_WaterDebugStitch) && (slot.m_RenderData.m_bValid || !slot.m_RenderData.m_sProblem.IsEmpty()))
+      {
+        // The mouth line: green where the river's mesh and the receiver's share every vertex of it, red where they
+        // do not or where the junction was left out. With the vertex counts of the three levels of detail.
+        const plWaterJunctionRenderSnapshot& render = slot.m_RenderData;
+        const bool bSound = render.m_bValid && render.m_fMaximumSeamError <= 0.0f;
+        const plColor color = bSound ? plColor::LimeGreen : plColor::Red;
+        const plVec3 vLift(0.0f, 0.0f, 0.08f);
+        if (render.m_bValid)
         {
-          const float z = slot.m_Data.m_vCenter.z + 0.08f;
-          const plDebugRenderer::Line seam(
-            plVec3(slot.m_RenderData.m_vStitchedLakeLeft.x, slot.m_RenderData.m_vStitchedLakeLeft.y, z),
-            plVec3(slot.m_RenderData.m_vStitchedLakeRight.x, slot.m_RenderData.m_vStitchedLakeRight.y, z), plColor::LimeGreen);
-          plDebugRenderer::DrawLines(GetWorld(), plMakeArrayPtr(&seam, 1), plColor::LimeGreen);
+          const plDebugRenderer::Line seam(render.m_vMouthLeft + vLift, render.m_vMouthRight + vLift, color);
+          plDebugRenderer::DrawLines(GetWorld(), plMakeArrayPtr(&seam, 1), color);
+          plDebugRenderer::DrawCross(GetWorld(), render.m_vMouthLeft + vLift, 0.3f, color);
+          plDebugRenderer::DrawCross(GetWorld(), render.m_vMouthRight + vLift, 0.3f, color);
+        }
+        if (cvar_WaterDebugStitch)
+        {
+          plStringBuilder sText;
+          if (!render.m_bValid)
+            sText.SetFormat("Junction left out: {}", render.m_sProblem);
+          else if (render.m_SecondaryType == plWaterBodyType::Ocean)
+            sText.SetFormat("River {} into ocean {}: apron, mix {} m", render.m_PrimaryBody.m_uiIndex, render.m_SecondaryBody.m_uiIndex, plArgF(render.m_fMixLengthReceiver, 1));
+          else
+            sText.SetFormat("River {} and lake {}: {} / {} / {} shared vertices, seam error {}", render.m_PrimaryBody.m_uiIndex, render.m_SecondaryBody.m_uiIndex,
+              render.m_uiSharedVertexCount[0], render.m_uiSharedVertexCount[1], render.m_uiSharedVertexCount[2], plArgF(render.m_fMaximumSeamError, 5));
+          plDebugRenderer::Draw3DText(GetWorld(), sText.GetData(), slot.m_Data.m_vCenter + plVec3(0.0f, 0.0f, 0.6f), color);
         }
       }
 
@@ -602,6 +433,16 @@ void plWaterWorldModule::DrawDebug() const
   }
 }
 
+void plWaterWorldModule::ResetSimulationClock(plTime startTime)
+{
+  PL_LOCK(m_Mutex);
+  m_uiSimulationTick = static_cast<plUInt64>(plMath::Max(startTime.GetSeconds(), 0.0) / s_fFixedStepSeconds);
+  m_fSimulationAccumulator = 0.0;
+  m_LastWallClockTime = plTime::Now();
+  m_PendingInteractions.Clear();
+  m_Interactions.Clear();
+}
+
 void plWaterWorldModule::SetDebugInteractionWindow(const plVec2& vCenter) const
 {
   PL_LOCK(m_Mutex);
@@ -625,9 +466,11 @@ plWaterBodyId plWaterWorldModule::RegisterBody(const plWaterBodyDescriptor& desc
   BodySlot& slot = m_Bodies[uiIndex];
   slot.m_bInUse = true;
   slot.m_uiGeneration = plMath::Max(slot.m_uiGeneration, 1u);
+  slot.m_Data = plWaterBodySnapshot();
   PrepareBody(slot, descriptor);
   slot.m_Data.m_BodyId.m_uiIndex = uiIndex;
   slot.m_Data.m_BodyId.m_uiGeneration = slot.m_uiGeneration;
+  RebuildNetworksAround(uiIndex);
   return slot.m_Data.m_BodyId;
 }
 
@@ -638,24 +481,19 @@ bool plWaterWorldModule::UpdateBody(plWaterBodyId bodyId, const plWaterBodyDescr
     return false;
 
   BodySlot& slot = m_Bodies[bodyId.m_uiIndex];
-  BodySlot candidate;
-  candidate.m_bInUse = true;
-  candidate.m_uiGeneration = slot.m_uiGeneration;
-  candidate.m_Data.m_BodyId = bodyId;
-  candidate.m_Data.m_uiGeometryRevision = slot.m_Data.m_uiGeometryRevision;
-  PrepareBody(candidate, descriptor);
-  candidate.m_Data.m_BodyId = bodyId;
-  if (descriptor.m_Type != plWaterBodyType::Ocean && !candidate.m_Data.m_bGeometryValid)
+  const bool bHadMesh = !slot.m_Data.m_FiniteMeshLods.IsEmpty();
+  PrepareBody(slot, descriptor);
+  slot.m_Data.m_BodyId = bodyId;
+  if (bHadMesh)
   {
-    plLog::Warning("Water body '{}' produced invalid finite geometry. Keeping revision {} until the spline or profile is repaired.",
-      descriptor.m_uiNetworkId, slot.m_Data.m_uiGeometryRevision);
-    return true;
+    // A body that is being edited changes many times a second, and often more than once a frame. It keeps the mesh
+    // it has until the next update, which builds one draft for all of its changes.
+    if (!m_BodiesAwaitingDraft.Contains(bodyId.m_uiIndex))
+      m_BodiesAwaitingDraft.PushBack(bodyId.m_uiIndex);
   }
-  slot.m_Data = std::move(candidate.m_Data);
-  for (JunctionSlot& junction : m_Junctions)
+  else
   {
-    if (junction.m_bInUse && (junction.m_Data.m_BodyA == bodyId || junction.m_Data.m_BodyB == bodyId))
-      PrepareJunction(junction);
+    RebuildNetworksAround(bodyId.m_uiIndex);
   }
   return true;
 }
@@ -665,14 +503,67 @@ void plWaterWorldModule::UnregisterBody(plWaterBodyId& inout_bodyId)
   PL_LOCK(m_Mutex);
   if (IsBodyIdValid(inout_bodyId))
   {
+    // Whatever was joined to this body has to be meshed again without it.
+    plHybridArray<plUInt32, 8> neighbours;
+    CollectJunctionNeighbours(inout_bodyId.m_uiIndex, neighbours);
+
     BodySlot& slot = m_Bodies[inout_bodyId.m_uiIndex];
     slot.m_bInUse = false;
     slot.m_Data = plWaterBodySnapshot();
     ++slot.m_uiGeneration;
     if (slot.m_uiGeneration == 0)
       slot.m_uiGeneration = 1;
+
+    for (JunctionSlot& junction : m_Junctions)
+    {
+      if (junction.m_bInUse && (junction.m_Data.m_BodyA.m_uiIndex == inout_bodyId.m_uiIndex || junction.m_Data.m_BodyB.m_uiIndex == inout_bodyId.m_uiIndex))
+        ResetJunctionRenderData(junction);
+    }
+    RebuildNetworks(neighbours);
   }
   inout_bodyId.Invalidate();
+}
+
+void plWaterWorldModule::CollectJunctionNeighbours(plUInt32 uiBody, plDynamicArray<plUInt32>& out_bodies) const
+{
+  for (const JunctionSlot& junction : m_Junctions)
+  {
+    if (!junction.m_bInUse)
+      continue;
+    if (junction.m_Data.m_BodyA.m_uiIndex == uiBody && IsBodyIdValid(junction.m_Data.m_BodyB))
+      out_bodies.PushBack(junction.m_Data.m_BodyB.m_uiIndex);
+    if (junction.m_Data.m_BodyB.m_uiIndex == uiBody && IsBodyIdValid(junction.m_Data.m_BodyA))
+      out_bodies.PushBack(junction.m_Data.m_BodyA.m_uiIndex);
+  }
+}
+
+void plWaterWorldModule::RebuildNetworksAround(plUInt32 uiBody, bool bDraft)
+{
+  // The body's own network, and the networks of everything a junction ties it to: an ocean is in no network, but
+  // the rivers that reach it carry its level and its profile in their aprons.
+  plHybridArray<plUInt32, 8> seeds;
+  seeds.PushBack(uiBody);
+  CollectJunctionNeighbours(uiBody, seeds);
+  RebuildNetworks(seeds, bDraft);
+}
+
+void plWaterWorldModule::RebuildDraftNow(plArrayPtr<const plUInt32> seedBodies)
+{
+  RebuildNetworks(seedBodies, true);
+  for (plUInt32 uiBody : seedBodies)
+  {
+    if (!m_BodiesAwaitingFullMeshes.Contains(uiBody))
+      m_BodiesAwaitingFullMeshes.PushBack(uiBody);
+  }
+  m_LastDraftTime = plTime::Now();
+}
+
+void plWaterWorldModule::ResetJunctionRenderData(JunctionSlot& junction)
+{
+  const plUInt32 uiRevision = junction.m_RenderData.m_uiRevision + 1;
+  junction.m_RenderData = plWaterJunctionRenderSnapshot();
+  junction.m_RenderData.m_Descriptor = junction.m_Data;
+  junction.m_RenderData.m_uiRevision = uiRevision;
 }
 
 plWaterBodyId plWaterWorldModule::RegisterLegacyOcean(plOceanComponent* pComponent)
@@ -730,8 +621,9 @@ plUInt32 plWaterWorldModule::RegisterJunction(const plWaterJunctionDescriptor& d
     m_Junctions.ExpandAndGetRef();
   m_Junctions[uiIndex].m_Data = descriptor;
   m_Junctions[uiIndex].m_bInUse = true;
-  PrepareJunction(m_Junctions[uiIndex]);
-  PrepareOtherJunctions(&m_Junctions[uiIndex]);
+  ResetJunctionRenderData(m_Junctions[uiIndex]);
+  const plUInt32 seeds[] = {descriptor.m_BodyA.m_uiIndex, descriptor.m_BodyB.m_uiIndex};
+  RebuildNetworks(seeds);
   return uiIndex;
 }
 
@@ -740,9 +632,12 @@ bool plWaterWorldModule::UpdateJunction(plUInt32 uiIndex, const plWaterJunctionD
   PL_LOCK(m_Mutex);
   if (uiIndex >= m_Junctions.GetCount() || !m_Junctions[uiIndex].m_bInUse)
     return false;
+  // The bodies the junction joined before may not be the ones it joins now.
+  const plUInt32 seeds[] = {m_Junctions[uiIndex].m_Data.m_BodyA.m_uiIndex, m_Junctions[uiIndex].m_Data.m_BodyB.m_uiIndex, descriptor.m_BodyA.m_uiIndex, descriptor.m_BodyB.m_uiIndex};
   m_Junctions[uiIndex].m_Data = descriptor;
-  PrepareJunction(m_Junctions[uiIndex]);
-  PrepareOtherJunctions(&m_Junctions[uiIndex]);
+  ResetJunctionRenderData(m_Junctions[uiIndex]);
+  // A junction that is being moved changes many times a second, like a body that is being edited.
+  RebuildDraftNow(seeds);
   return true;
 }
 
@@ -751,9 +646,10 @@ void plWaterWorldModule::UnregisterJunction(plUInt32& inout_uiIndex)
   PL_LOCK(m_Mutex);
   if (inout_uiIndex < m_Junctions.GetCount())
   {
+    const plUInt32 seeds[] = {m_Junctions[inout_uiIndex].m_Data.m_BodyA.m_uiIndex, m_Junctions[inout_uiIndex].m_Data.m_BodyB.m_uiIndex};
     m_Junctions[inout_uiIndex].m_bInUse = false;
     m_Junctions[inout_uiIndex].m_RenderData = plWaterJunctionRenderSnapshot();
-    PrepareOtherJunctions(&m_Junctions[inout_uiIndex]);
+    RebuildNetworks(seeds);
   }
   inout_uiIndex = plInvalidIndex;
 }
@@ -827,643 +723,125 @@ void plWaterWorldModule::CopyBodySnapshots(plDynamicArray<plWaterBodySnapshot>& 
   }
 }
 
+bool plWaterWorldModule::TryGetBodyRenderInfo(plWaterBodyId bodyId, plWaterBodyRenderInfo& out_info) const
+{
+  PL_LOCK(m_Mutex);
+  if (!IsBodyIdValid(bodyId))
+    return false;
+
+  const plWaterBodySnapshot& body = m_Bodies[bodyId.m_uiIndex].m_Data;
+  out_info.m_BodyId = body.m_BodyId;
+  out_info.m_Type = body.m_Descriptor.m_Type;
+  out_info.m_fBaseHeight = body.m_Descriptor.m_fBaseHeight;
+  out_info.m_fOceanPatchSize = body.m_Descriptor.m_fOceanPatchSize;
+  out_info.m_fFlowSpeed = body.m_Descriptor.m_fFlowSpeed;
+  out_info.m_Profile = body.m_Profile;
+  out_info.m_WorldBounds = body.m_WorldBounds;
+  out_info.m_FiniteMeshLods = body.m_FiniteMeshLods;
+  out_info.m_OceanPatches = body.m_OceanPatches;
+  out_info.m_uiGeometryRevision = body.m_uiGeometryRevision;
+  out_info.m_bGeometryValid = body.m_bGeometryValid;
+  return true;
+}
+
+void plWaterWorldModule::CopyOceanCutouts(plWaterBodyId oceanId, plDynamicArray<plWaterOceanCutout>& out_cutouts) const
+{
+  PL_LOCK(m_Mutex);
+  out_cutouts.Clear();
+  for (const JunctionSlot& slot : m_Junctions)
+  {
+    const plWaterJunctionRenderSnapshot& render = slot.m_RenderData;
+    if (!slot.m_bInUse || !render.m_bValid || render.m_SecondaryBody != oceanId || render.m_fCutoutHalfLength <= 0.0f)
+      continue;
+
+    plWaterOceanCutout& cutout = out_cutouts.ExpandAndGetRef();
+    cutout.m_vCenter = render.m_vCutoutCenter;
+    cutout.m_vDirection = render.m_vCutoutDirection;
+    cutout.m_fHalfLength = render.m_fCutoutHalfLength;
+    cutout.m_fStartHalfWidth = render.m_fStartHalfWidth;
+    cutout.m_fEndHalfWidth = render.m_fEndHalfWidth;
+    cutout.m_fHoldFraction = render.m_fCutoutHoldFraction;
+  }
+}
+
+void plWaterFillGpuProfile(plWaterGpuProfile& out_entry, const plWaterProfileResourceDescriptor& profile, plWaterBodyType::Enum type, float fFlowSpeed)
+{
+  const bool bRiver = type == plWaterBodyType::River;
+  // The ocean always may use the spectrum, a lake only when its profile says so, a river never.
+  const bool bSpectrumAllowed = type == plWaterBodyType::Ocean || (type == plWaterBodyType::Lake && profile.m_bEnableLakeSpectrum);
+  // Reflected caustics are for finite water only. An ocean would project them over the whole scene.
+  const float fReflectedCaustics = type == plWaterBodyType::Ocean ? 0.0f : profile.m_fReflectedCaustics;
+  const plVec2 vWind = profile.m_vWindDirection.IsZero() ? plVec2(1.0f, 0.0f) : profile.m_vWindDirection;
+
+  out_entry.WaveParams = plVec4(profile.m_fWaveAmplitude, profile.m_fBaseWavelength, profile.m_fWindSpeed, profile.m_fWaveSteepness);
+  // An ocean has no current: its detail and foam drift with the wind only.
+  const bool bOcean = type == plWaterBodyType::Ocean;
+  out_entry.WindAndFlow = plVec4(vWind.x, vWind.y, bOcean ? 0.0f : fFlowSpeed, bOcean ? 0.0f : profile.m_fFlowScale);
+  out_entry.SpectrumParams = plVec4(0.0f, bSpectrumAllowed ? static_cast<float>(profile.m_uiGpuCascadeCount) : 0.0f, profile.m_fRippleMaxAmplitude, bRiver ? 1.0f : 0.0f);
+  // Extinction per metre, fitted to the profile's look: white sand under Refraction Depth metres of water has the
+  // Shallow Color. Deep water has the Deep Color under white light. This is the one optical model the surface
+  // shader has; the profile's Absorption and Scattering are what the underwater view uses.
+  const float fReferenceDepth = plMath::Max(profile.m_fRefractionDepth, 0.1f);
+  const plVec3 vExtinction(
+    -plMath::Ln(plMath::Clamp(profile.m_ShallowColor.r, 0.02f, 0.98f)) / fReferenceDepth,
+    -plMath::Ln(plMath::Clamp(profile.m_ShallowColor.g, 0.02f, 0.98f)) / fReferenceDepth,
+    -plMath::Ln(plMath::Clamp(profile.m_ShallowColor.b, 0.02f, 0.98f)) / fReferenceDepth);
+  out_entry.AbsorptionAndRoughness = plVec4(vExtinction.x, vExtinction.y, vExtinction.z, profile.m_fRoughness);
+  out_entry.ScatteringAndIor = plVec4(profile.m_vScattering.x, profile.m_vScattering.y, profile.m_vScattering.z, profile.m_fIndexOfRefraction);
+  out_entry.ShallowColor = profile.m_ShallowColor.GetAsVec4();
+  out_entry.DeepColor = profile.m_DeepColor.GetAsVec4();
+  out_entry.OpticalParams = plVec4(profile.m_fReflectionStrength, profile.m_fEnvironmentReflectionWeight, profile.m_fRefractionDepth, profile.m_fShoreFadeDepth);
+  out_entry.FoamParams = plVec4(profile.m_fFoamStrength, profile.m_fFoamCrestThreshold, profile.m_fFoamShoreDepth, profile.m_fRefractionStrength);
+  out_entry.SurfaceDetailParams = plVec4(profile.m_fMicroNormalScale, profile.m_fMicroNormalStrength, profile.m_fSunGlitterStrength, profile.m_fRefractionEdgeRejection);
+  out_entry.FoamMaterialParams = plVec4(profile.m_fFoamRoughness, profile.m_fFoamBreakupScale, profile.m_sFoamTexture.IsEmpty() ? 0.0f : 1.0f, profile.m_sNormalTexture.IsEmpty() ? 0.0f : 1.0f);
+  out_entry.FoamColor = profile.m_FoamColor.GetAsVec4();
+  out_entry.CausticParams = plVec4(profile.m_fUnderwaterCaustics, fReflectedCaustics, 0.0f, 0.0f);
+}
+
+plUInt32 plWaterWorldModule::FillGpuProfileTable(plArrayPtr<plWaterGpuProfile> out_entries) const
+{
+  PL_LOCK(m_Mutex);
+
+  // A body that is not there leaves a hole in the table. Holes hold the default profile, so an index that outlived
+  // its body still reads something sane.
+  const plWaterProfileResourceDescriptor defaultProfile;
+  plUInt32 uiCount = 0;
+  for (plUInt32 i = 0; i < m_Bodies.GetCount() && i < out_entries.GetCount(); ++i)
+  {
+    const BodySlot& slot = m_Bodies[i];
+    if (slot.m_bInUse)
+    {
+      plWaterFillGpuProfile(out_entries[i], slot.m_Data.m_Profile, slot.m_Data.m_Descriptor.m_Type, slot.m_Data.m_Descriptor.m_fFlowSpeed);
+      uiCount = i + 1;
+    }
+    else
+    {
+      plWaterFillGpuProfile(out_entries[i], defaultProfile, plWaterBodyType::Lake, 0.0f);
+    }
+  }
+  return uiCount;
+}
+
 void plWaterWorldModule::CopyJunctionRenderSnapshots(plDynamicArray<plWaterJunctionRenderSnapshot>& out_snapshots) const
 {
   PL_LOCK(m_Mutex);
   out_snapshots.Clear();
   for (const JunctionSlot& slot : m_Junctions)
   {
-    if (slot.m_bInUse && slot.m_RenderData.m_bValid)
+    if (slot.m_bInUse)
       out_snapshots.PushBack(slot.m_RenderData);
-  }
-}
-
-void plWaterWorldModule::PrepareJunction(JunctionSlot& slot)
-{
-  const plUInt32 uiRevision = slot.m_RenderData.m_uiRevision + 1;
-  slot.m_RenderData = plWaterJunctionRenderSnapshot();
-  slot.m_RenderData.m_Descriptor = slot.m_Data;
-  slot.m_RenderData.m_uiRevision = uiRevision;
-
-  if (!IsBodyIdValid(slot.m_Data.m_BodyA) || !IsBodyIdValid(slot.m_Data.m_BodyB))
-    return;
-
-  const plWaterBodySnapshot& bodyA = m_Bodies[slot.m_Data.m_BodyA.m_uiIndex].m_Data;
-  const plWaterBodySnapshot& bodyB = m_Bodies[slot.m_Data.m_BodyB.m_uiIndex].m_Data;
-  const plWaterBodySnapshot* pRiver = nullptr;
-  const plWaterBodySnapshot* pSecondary = nullptr;
-  plVec3 riverAnchor = plVec3::MakeZero();
-  plVec3 secondaryAnchor = plVec3::MakeZero();
-  if (bodyA.m_Descriptor.m_Type == plWaterBodyType::River && bodyB.m_Descriptor.m_Type != plWaterBodyType::River)
-  {
-    pRiver = &bodyA;
-    pSecondary = &bodyB;
-    riverAnchor = slot.m_Data.m_vAnchorA;
-    secondaryAnchor = slot.m_Data.m_vAnchorB;
-  }
-  else if (bodyB.m_Descriptor.m_Type == plWaterBodyType::River && bodyA.m_Descriptor.m_Type != plWaterBodyType::River)
-  {
-    pRiver = &bodyB;
-    pSecondary = &bodyA;
-    riverAnchor = slot.m_Data.m_vAnchorB;
-    secondaryAnchor = slot.m_Data.m_vAnchorA;
-  }
-  else
-  {
-    return; // Other typed junction pairs continue to use deterministic query blending only.
-  }
-
-  if (!pRiver->m_bGeometryValid || !pSecondary->m_bGeometryValid || pRiver->m_Vertices.GetCount() < 4)
-    return;
-
-  plUInt32 uiColumns = 1;
-  const float fFirstCoordinate = pRiver->m_Vertices[0].m_vTexCoord.x;
-  while (uiColumns < pRiver->m_Vertices.GetCount() &&
-         plMath::Abs(pRiver->m_Vertices[uiColumns].m_vTexCoord.x - fFirstCoordinate) < 0.0001f)
-  {
-    ++uiColumns;
-  }
-  if (uiColumns < 3 || pRiver->m_Vertices.GetCount() % uiColumns != 0)
-    return;
-
-  const plUInt32 uiRows = pRiver->m_Vertices.GetCount() / uiColumns;
-  auto RowCenter = [&](plUInt32 uiRow)
-  {
-    return (pRiver->m_Vertices[uiRow * uiColumns].m_vPosition + pRiver->m_Vertices[uiRow * uiColumns + uiColumns - 1].m_vPosition) * 0.5f;
-  };
-
-  const bool bAttachAtEnd = (RowCenter(uiRows - 1) - riverAnchor).GetLengthSquared() < (RowCenter(0) - riverAnchor).GetLengthSquared();
-  plVec3 outward = bAttachAtEnd ? RowCenter(uiRows - 1) - RowCenter(uiRows - 2) : RowCenter(0) - RowCenter(1);
-  outward.z = 0.0f;
-  outward.NormalizeIfNotZero(plVec3::MakeAxisX()).IgnoreResult();
-  const float fBlendDistance = plMath::Max(slot.m_Data.m_fBlendDistance, 0.5f);
-  const plVec3 desiredStart = riverAnchor - outward * fBlendDistance;
-
-  plUInt32 uiStartRow = 0;
-  float fBestDistanceSquared = plMath::HighValue<float>();
-  for (plUInt32 uiRow = 0; uiRow < uiRows; ++uiRow)
-  {
-    const float fDistanceSquared = (RowCenter(uiRow) - desiredStart).GetLengthSquared();
-    if (fDistanceSquared < fBestDistanceSquared)
-    {
-      fBestDistanceSquared = fDistanceSquared;
-      uiStartRow = uiRow;
-    }
-  }
-
-  const plVec3 rowFirst = pRiver->m_Vertices[uiStartRow * uiColumns].m_vPosition;
-  const plVec3 rowLast = pRiver->m_Vertices[uiStartRow * uiColumns + uiColumns - 1].m_vPosition;
-  const plVec3 startCenter = (rowFirst + rowLast) * 0.5f;
-  plVec2 patchDirection = (riverAnchor - startCenter).GetAsVec2();
-  patchDirection.NormalizeIfNotZero(outward.GetAsVec2()).IgnoreResult();
-  const plVec2 patchPerpendicular(-patchDirection.y, patchDirection.x);
-
-  // Patch column 0 is the +perpendicular ("left") side. The river row may run either way; remember the
-  // orientation so row 0 can copy the river vertices verbatim - the weld must be exact, not re-derived.
-  const bool bRowForward = (rowFirst - startCenter).GetAsVec2().Dot(patchPerpendicular) >= 0.0f;
-  auto RiverRowVertex = [&](plUInt32 uiColumn) -> const plWaterGeometryVertex&
-  {
-    const plUInt32 uiRiverColumn = bRowForward ? uiColumn : uiColumns - 1 - uiColumn;
-    return pRiver->m_Vertices[uiStartRow * uiColumns + uiRiverColumn];
-  };
-  const plVec3 startLeft = RiverRowVertex(0).m_vPosition;
-  const plVec3 startRight = RiverRowVertex(uiColumns - 1).m_vPosition;
-  const plVec2 localRiverFlow = RiverRowVertex(uiColumns / 2).m_vFlow.GetAsVec2();
-  const float fLocalRiverFlowScale = plMath::Max(localRiverFlow.GetLength(), 0.0f);
-  const plVec2 riverFlowDirection = NormalizeOr(localRiverFlow, patchDirection);
-  const float fRiverFlowScalar = pRiver->m_Descriptor.m_fFlowSpeed * pRiver->m_Profile.m_fFlowScale;
-  const float fRiverFlowScalarSign = fRiverFlowScalar < 0.0f ? -1.0f : 1.0f;
-  const plVec2 effectiveRiverFlowDirection = riverFlowDirection * fRiverFlowScalarSign;
-  // River ribbons are authored start -> end. At an end attachment that direction enters the receiving body;
-  // at a start attachment it points back into the river and therefore represents lake outflow. A negative
-  // body FlowSpeed reverses that result without requiring the spline or junction anchors to be rebuilt.
-  const float fFlowDirectionSign = effectiveRiverFlowDirection.Dot(patchDirection) >= 0.0f ? 1.0f : -1.0f;
-
-  const float fStartHalfWidth = (startLeft - startRight).GetLength() * 0.5f;
-  const bool bLakeReceiver = pSecondary->m_Descriptor.m_Type == plWaterBodyType::Lake;
-  const float fDesiredEndHalfWidth = bLakeReceiver
-                                       ? plMath::Max(fStartHalfWidth * 1.1f, fStartHalfWidth + 0.25f)
-                                       : plMath::Max(fStartHalfWidth * 1.5f, fStartHalfWidth + 1.0f);
-  const float fCellSize = plMath::Clamp(
-    plMath::Min(pRiver->m_Profile.m_fFiniteMeshCellSize, pSecondary->m_Profile.m_fFiniteMeshCellSize), 0.25f, 4.0f);
-
-  // The ocean surface sits at the owner height, but a lake surface sits at its authored control-point height
-  // (see SampleBody). Using the owner height here can sink the patch below the opaque floor, where the
-  // occlusion clip removes it and leaves the cutout as a hole.
-  float fSecondarySurfaceZ = pSecondary->m_Descriptor.m_fBaseHeight;
-  if (pSecondary->m_Descriptor.m_Type == plWaterBodyType::Lake && !pSecondary->m_Descriptor.m_ControlPoints.IsEmpty())
-  {
-    fSecondarySurfaceZ = 0.0f;
-    for (const plWaterControlPoint& point : pSecondary->m_Descriptor.m_ControlPoints)
-      fSecondarySurfaceZ += point.m_vPosition.z;
-    fSecondarySurfaceZ /= static_cast<float>(pSecondary->m_Descriptor.m_ControlPoints.GetCount());
-  }
-
-  plVec2 receiverAdvance = patchDirection;
-  plVec2 receiverLateral = patchPerpendicular;
-  float fReceiverPenetration = fBlendDistance;
-  plVec3 shorelinePoint = secondaryAnchor;
-  plDynamicArray<plUInt32> lakeBoundaryLoop;
-  plDynamicArray<plUInt32> lakeShoreChain;
-  float fMaximumLakeSeamError = 0.0f;
-  if (bLakeReceiver)
-  {
-    // Use the already-triangulated lake perimeter as the receiving edge. The transition can then duplicate
-    // those exact vertices rather than ending on a separately sampled row inside the lake.
-    if (!BuildBoundaryLoop(pSecondary->m_Vertices, pSecondary->m_Indices, lakeBoundaryLoop))
-      return;
-
-    float fSignedArea = 0.0f;
-    float fBestDistanceSquared = plMath::HighValue<float>();
-    float fBestEdgeFraction = 0.0f;
-    plUInt32 uiBestEdge = plInvalidIndex;
-    for (plUInt32 i = 0; i < lakeBoundaryLoop.GetCount(); ++i)
-    {
-      const plVec2 a = pSecondary->m_Vertices[lakeBoundaryLoop[i]].m_vPosition.GetAsVec2();
-      const plVec2 b = pSecondary->m_Vertices[lakeBoundaryLoop[(i + 1) % lakeBoundaryLoop.GetCount()]].m_vPosition.GetAsVec2();
-      fSignedArea += a.x * b.y - b.x * a.y;
-      const plVec2 edge = b - a;
-      const float fLengthSquared = edge.GetLengthSquared();
-      if (fLengthSquared <= plMath::SmallEpsilon<float>())
-        continue;
-      const float t = plMath::Clamp((secondaryAnchor.GetAsVec2() - a).Dot(edge) / fLengthSquared, 0.0f, 1.0f);
-      const plVec2 closest = a + edge * t;
-      const float fDistanceSquared = (secondaryAnchor.GetAsVec2() - closest).GetLengthSquared();
-      if (fDistanceSquared < fBestDistanceSquared)
-      {
-        fBestDistanceSquared = fDistanceSquared;
-        fBestEdgeFraction = t;
-        uiBestEdge = i;
-        shorelinePoint = plVec3(closest.x, closest.y,
-          plMath::Lerp(pSecondary->m_Vertices[lakeBoundaryLoop[i]].m_vPosition.z,
-            pSecondary->m_Vertices[lakeBoundaryLoop[(i + 1) % lakeBoundaryLoop.GetCount()]].m_vPosition.z, t));
-      }
-    }
-    if (uiBestEdge == plInvalidIndex)
-      return;
-
-    const plUInt32 uiNextEdgeVertex = (uiBestEdge + 1) % lakeBoundaryLoop.GetCount();
-    const plVec2 shorelineTangent = NormalizeOr(
-      pSecondary->m_Vertices[lakeBoundaryLoop[uiNextEdgeVertex]].m_vPosition.GetAsVec2() -
-        pSecondary->m_Vertices[lakeBoundaryLoop[uiBestEdge]].m_vPosition.GetAsVec2(),
-      patchPerpendicular);
-    receiverAdvance = fSignedArea >= 0.0f
-                        ? plVec2(-shorelineTangent.y, shorelineTangent.x)
-                        : plVec2(shorelineTangent.y, -shorelineTangent.x);
-    receiverLateral = shorelineTangent;
-    if (receiverLateral.Dot(patchPerpendicular) < 0.0f)
-      receiverLateral = -receiverLateral;
-
-    const plUInt32 uiCenter = fBestEdgeFraction < 0.5f ? uiBestEdge : uiNextEdgeVertex;
-    const plUInt32 uiPrevious = (uiCenter + lakeBoundaryLoop.GetCount() - 1) % lakeBoundaryLoop.GetCount();
-    const plUInt32 uiNext = (uiCenter + 1) % lakeBoundaryLoop.GetCount();
-    const plVec2 centerPosition = pSecondary->m_Vertices[lakeBoundaryLoop[uiCenter]].m_vPosition.GetAsVec2();
-    const float fPreviousLateral = (pSecondary->m_Vertices[lakeBoundaryLoop[uiPrevious]].m_vPosition.GetAsVec2() - centerPosition).Dot(receiverLateral);
-    const float fNextLateral = (pSecondary->m_Vertices[lakeBoundaryLoop[uiNext]].m_vPosition.GetAsVec2() - centerPosition).Dot(receiverLateral);
-    const bool bPositiveLateralIsNext = fNextLateral >= fPreviousLateral;
-    auto AdvanceBoundary = [&](plUInt32 index, bool bPositiveDirection)
-    {
-      const bool bAdvanceNext = bPositiveDirection == bPositiveLateralIsNext;
-      return bAdvanceNext ? (index + 1) % lakeBoundaryLoop.GetCount()
-                          : (index + lakeBoundaryLoop.GetCount() - 1) % lakeBoundaryLoop.GetCount();
-    };
-    auto ExpandToWidth = [&](bool bPositiveDirection)
-    {
-      plUInt32 index = uiCenter;
-      float fDistance = 0.0f;
-      for (plUInt32 guard = 0; guard + 2 < lakeBoundaryLoop.GetCount() && fDistance < fDesiredEndHalfWidth; ++guard)
-      {
-        const plUInt32 next = AdvanceBoundary(index, bPositiveDirection);
-        fDistance += (pSecondary->m_Vertices[lakeBoundaryLoop[next]].m_vPosition -
-                      pSecondary->m_Vertices[lakeBoundaryLoop[index]].m_vPosition).GetLength();
-        index = next;
-      }
-      return index;
-    };
-
-    const plUInt32 uiLeft = ExpandToWidth(true);
-    const plUInt32 uiRight = ExpandToWidth(false);
-    plUInt32 index = uiLeft;
-    for (plUInt32 guard = 0; guard < lakeBoundaryLoop.GetCount(); ++guard)
-    {
-      lakeShoreChain.PushBack(lakeBoundaryLoop[index]);
-      if (index == uiRight)
-        break;
-      index = AdvanceBoundary(index, false);
-    }
-    if (lakeShoreChain.GetCount() < 2 || lakeShoreChain.PeekBack() != lakeBoundaryLoop[uiRight])
-      return;
-
-    // The current plume begins on the actual shoreline. There is no lake-side penetration or overdraw.
-    fReceiverPenetration = 0.0f;
-  }
-
-  plVec3 endCenter(secondaryAnchor.x, secondaryAnchor.y, fSecondarySurfaceZ);
-  plVec3 endLeft;
-  plVec3 endRight;
-  float fEndHalfWidth = fDesiredEndHalfWidth;
-  if (bLakeReceiver)
-  {
-    endLeft = pSecondary->m_Vertices[lakeShoreChain[0]].m_vPosition;
-    endRight = pSecondary->m_Vertices[lakeShoreChain.PeekBack()].m_vPosition;
-    endCenter = (endLeft + endRight) * 0.5f;
-    fEndHalfWidth = (endLeft - endRight).GetLength() * 0.5f;
-  }
-  else
-  {
-    endCenter += plVec3(receiverAdvance.x, receiverAdvance.y, 0.0f) * fReceiverPenetration;
-    endLeft = endCenter + plVec3(receiverLateral.x, receiverLateral.y, 0.0f) * fEndHalfWidth;
-    endRight = endCenter - plVec3(receiverLateral.x, receiverLateral.y, 0.0f) * fEndHalfWidth;
-  }
-  const float fPatchLength = (endCenter - startCenter).GetLength();
-  plVec2 cutoutDirection = (endCenter - startCenter).GetAsVec2();
-  cutoutDirection.NormalizeIfNotZero(patchDirection).IgnoreResult();
-  // A lake junction needs at least three longitudinal segments: one to leave the river material, one to
-  // converge all material/displacement inputs, and one full pure-lake strip before the stitched shoreline.
-  const plUInt32 uiMinimumPatchSegments = bLakeReceiver ? 3u : 1u;
-  const plUInt32 uiPatchSegments = plMath::Clamp<plUInt32>(
-    static_cast<plUInt32>(plMath::Ceil(fPatchLength / fCellSize)), uiMinimumPatchSegments, 128);
-  const plUInt32 uiPatchRows = bLakeReceiver ? uiPatchSegments : uiPatchSegments + 1;
-  // Column count must match the river cross-section exactly: row 0 copies those vertices one to one, and any
-  // resampling would leave T-junction cracks along the weld once waves displace the shared edge.
-  const plUInt32 uiPatchColumns = uiColumns;
-
-  // The lake current extends beyond the narrow topology bridge and is evaluated on the lake's own tessellated
-  // surface. Keeping it separate from the cutout prevents a long replacement trapezoid from damaging lake
-  // topology while still making water visibly enter or leave the basin.
-  const float fRiverPush = plMath::Abs(fRiverFlowScalar) * fLocalRiverFlowScale;
-  const float fFlowFieldLength = bLakeReceiver
-                                   ? plMath::Clamp(plMath::Max(fBlendDistance * 1.5f, fStartHalfWidth * 4.0f), 3.0f, 24.0f)
-                                   : 0.0f;
-  const float fFlowFieldHalfWidth = bLakeReceiver
-                                      ? plMath::Clamp(plMath::Max(fStartHalfWidth * 1.35f, fCellSize * 1.5f), 0.75f, 12.0f)
-                                      : 0.0f;
-
-  // River inflow contests waves travelling back into the mouth. Lake outflow through a river-start junction
-  // moves with the receiving water instead, so the lake profile reaches farther upstream and does not create
-  // artificial collision foam.
-  const float fWavePush = plMath::Max(pSecondary->m_Profile.m_fWaveAmplitude, 0.0f) * plMath::Max(pSecondary->m_Profile.m_fWindSpeed, 0.1f);
-  const float fPushback = fWavePush / plMath::Max(fWavePush + fRiverPush, 0.0001f);
-  const float fBlendMidpoint = fFlowDirectionSign > 0.0f ? plMath::Lerp(0.65f, 0.35f, fPushback) : 0.3f;
-  const float fBlendHalfWidth = plMath::Max(plMath::Min(fBlendMidpoint, 1.0f - fBlendMidpoint), 0.05f);
-  const float fContest = fFlowDirectionSign > 0.0f ? 4.0f * fPushback * (1.0f - fPushback) : 0.0f;
-  slot.m_RenderData.m_fMouthFoamStrength = fContest * plMath::Min((fRiverPush + fWavePush) * 0.25f, 1.0f);
-
-  // The secondary's wave attenuation field at a position: oceans are unattenuated, lakes fade waves toward
-  // their authored boundary. The patch must reproduce this exactly or its edges displace differently than
-  // the surface they abut.
-  auto SecondaryAttenuationAt = [&](const plVec2& vPosition) -> float
-  {
-    if (pSecondary->m_Descriptor.m_Type != plWaterBodyType::Lake || pSecondary->m_Descriptor.m_ControlPoints.GetCount() < 3)
-      return 1.0f;
-    float fBestDistanceSquared = plMath::HighValue<float>();
-    const auto& boundary = pSecondary->m_Descriptor.m_ControlPoints;
-    for (plUInt32 i = 0; i < boundary.GetCount(); ++i)
-    {
-      const plVec2 a = boundary[i].m_vPosition.GetAsVec2();
-      const plVec2 b = boundary[(i + 1) % boundary.GetCount()].m_vPosition.GetAsVec2();
-      const plVec2 edge = b - a;
-      const float fLengthSquared = edge.GetLengthSquared();
-      const float fEdgeT = fLengthSquared > plMath::SmallEpsilon<float>() ? plMath::Clamp((vPosition - a).Dot(edge) / fLengthSquared, 0.0f, 1.0f) : 0.0f;
-      fBestDistanceSquared = plMath::Min(fBestDistanceSquared, (vPosition - (a + edge * fEdgeT)).GetLengthSquared());
-    }
-    return plMath::SmoothStep(plMath::Sqrt(fBestDistanceSquared), 0.0f, plMath::Max(pSecondary->m_Profile.m_fShoreWaveFadeDistance, 0.01f));
-  };
-
-  const float fLateralFeather = plMath::Clamp(fBlendDistance * 0.5f, 1.0f, 6.0f);
-  plDynamicArray<plWaterGeometryVertex> vertices;
-  plDynamicArray<plUInt32> indices;
-  const plUInt32 uiGridVertexCount = uiPatchRows * uiPatchColumns;
-  const plUInt32 uiLakeBoundaryVertexCount = bLakeReceiver ? lakeShoreChain.GetCount() : 0;
-  vertices.SetCount(uiGridVertexCount + uiLakeBoundaryVertexCount);
-  indices.Reserve(uiPatchRows * (uiPatchColumns + uiLakeBoundaryVertexCount) * 6);
-  for (plUInt32 row = 0; row < uiPatchRows; ++row)
-  {
-    const float t = static_cast<float>(row) / static_cast<float>(uiPatchSegments);
-    const float shape = t * t * (3.0f - 2.0f * t);
-    const float fBlendAlong = plMath::SmoothStep(t, fBlendMidpoint - fBlendHalfWidth, fBlendMidpoint + fBlendHalfWidth);
-    const float fLakeBlendEnd = static_cast<float>(uiPatchSegments - 1) / static_cast<float>(uiPatchSegments);
-    const float fLakeBlendWidth = plMath::Max(2.0f / static_cast<float>(uiPatchSegments), 0.3f);
-    const float fLakeMaterialConvergence = bLakeReceiver
-                                             ? plMath::SmoothStep(t, plMath::Max(fLakeBlendEnd - fLakeBlendWidth, 0.1f), fLakeBlendEnd)
-                                             : 0.0f;
-    const plVec3 left = plMath::Lerp(startLeft, endLeft, shape);
-    const plVec3 right = plMath::Lerp(startRight, endRight, shape);
-    const float fWidth = (left - right).GetLength();
-    // The lateral feather turns the patch pure-secondary at its side edges, which cut through open water
-    // once the trapezoid has widened past the river mouth. It must stay off at the weld row, where the
-    // side columns are the river banks and remain river water.
-    const float fSideRamp = plMath::SmoothStep(t, 0.0f, 0.35f);
-    for (plUInt32 column = 0; column < uiPatchColumns; ++column)
-    {
-      const float lateral = static_cast<float>(column) / static_cast<float>(uiPatchColumns - 1);
-      const plWaterGeometryVertex& riverVertex = RiverRowVertex(column);
-      plWaterGeometryVertex& vertex = vertices[row * uiPatchColumns + column];
-      if (row == 0)
-      {
-        // Exact weld: identical position and identical displacement inputs mean the shared edge transforms
-        // bit-for-bit like the river's own row, so no crack can open regardless of wave state.
-        vertex = riverVertex;
-        vertex.m_vTexCoord = plVec2(0.0f, lateral);
-        vertex.m_fProfileBlend = 0.0f;
-        continue;
-      }
-
-      vertex.m_vPosition = plMath::Lerp(left, right, lateral);
-      const float fDistanceToSide = plMath::Min(lateral, 1.0f - lateral) * fWidth;
-      const float fLateralOcean = (1.0f - plMath::SmoothStep(fDistanceToSide, 0.0f, fLateralFeather)) * fSideRamp;
-      const float fBaseBlend2D = plMath::Saturate(1.0f - (1.0f - fBlendAlong) * (1.0f - fLateralOcean));
-      // Blend every vertex-driven input to pure lake before the final strip. That strip and the lake draw then
-      // evaluate identical displacement, normal, foam and optical endpoints across the shared shoreline.
-      const float fBlend2D = plMath::Saturate(1.0f - (1.0f - fBaseBlend2D) * (1.0f - fLakeMaterialConvergence));
-
-      plVec2 flowDirection = riverVertex.m_vFlow.GetAsVec2();
-      flowDirection.NormalizeIfNotZero(patchDirection).IgnoreResult();
-      // Tangents are multiplied by the signed flow scalar in the shader. Divide the desired physical field
-      // direction by that sign here so negative FlowSpeed does not reverse the lake plume twice.
-      const plVec2 receivingTangentDirection = receiverAdvance * (fFlowDirectionSign * fRiverFlowScalarSign);
-      plVec2 spillDirection = plMath::Lerp(flowDirection, receivingTangentDirection, fBlendAlong);
-      spillDirection.NormalizeIfNotZero(receivingTangentDirection).IgnoreResult();
-      // Tangents encode direction only. The localized speed/falloff lives in JunctionFlow constants; scaling
-      // this vector was ineffective because mesh upload correctly normalizes tangents.
-      vertex.m_vFlow = plVec3(spillDirection.x, spillDirection.y, 0.0f);
-      vertex.m_vTexCoord = plVec2(t * fPatchLength, lateral);
-      vertex.m_fSignedShoreDistance = plMath::Lerp(fWidth * 0.5f, -fWidth * 0.5f, lateral);
-      vertex.m_fDepth = plMath::Lerp(riverVertex.m_fDepth, pSecondary->m_Descriptor.m_fDefaultDepth, fBlend2D);
-      // Blend from the river cross-section's own attenuation toward the secondary body's field so both the
-      // weld row and the outer edges displace exactly like the surfaces they touch.
-      vertex.m_fWaveAttenuation = plMath::Lerp(riverVertex.m_fWaveAttenuation, SecondaryAttenuationAt(vertex.m_vPosition.GetAsVec2()), fBlend2D);
-      vertex.m_fProfileBlend = fBlend2D;
-    }
-  }
-
-  if (bLakeReceiver)
-  {
-    for (plUInt32 i = 0; i < lakeShoreChain.GetCount(); ++i)
-    {
-      // Duplicate the complete lake boundary vertex. ProfileBlend is the only changed attribute because this
-      // mesh is shaded as river-primary/lake-secondary; all geometric displacement inputs remain identical.
-      plWaterGeometryVertex& vertex = vertices[uiGridVertexCount + i];
-      vertex = pSecondary->m_Vertices[lakeShoreChain[i]];
-      vertex.m_fProfileBlend = 1.0f;
-      fMaximumLakeSeamError = plMath::Max(fMaximumLakeSeamError,
-        (vertex.m_vPosition - pSecondary->m_Vertices[lakeShoreChain[i]].m_vPosition).GetLength());
-    }
-  }
-
-  for (plUInt32 row = 0; row + 1 < uiPatchRows; ++row)
-  {
-    for (plUInt32 column = 0; column + 1 < uiPatchColumns; ++column)
-    {
-      const plUInt32 a = row * uiPatchColumns + column;
-      const plUInt32 b = a + 1;
-      const plUInt32 c = a + uiPatchColumns;
-      const plUInt32 d = c + 1;
-      indices.PushBack(a); indices.PushBack(b); indices.PushBack(c);
-      indices.PushBack(b); indices.PushBack(d); indices.PushBack(c);
-    }
-  }
-
-  if (bLakeReceiver)
-  {
-    // Join the regular river-width row to the lake's differently sampled shoreline with an arc-length zipper.
-    // Both polylines keep every source vertex, so no T-junction is introduced on either side of the seam.
-    const plUInt32 uiLastGridRow = (uiPatchRows - 1) * uiPatchColumns;
-    plDynamicArray<float> gridDistance;
-    plDynamicArray<float> shoreDistance;
-    gridDistance.SetCount(uiPatchColumns);
-    shoreDistance.SetCount(uiLakeBoundaryVertexCount);
-    gridDistance[0] = 0.0f;
-    shoreDistance[0] = 0.0f;
-    for (plUInt32 i = 1; i < uiPatchColumns; ++i)
-      gridDistance[i] = gridDistance[i - 1] + (vertices[uiLastGridRow + i].m_vPosition - vertices[uiLastGridRow + i - 1].m_vPosition).GetLength();
-    for (plUInt32 i = 1; i < uiLakeBoundaryVertexCount; ++i)
-      shoreDistance[i] = shoreDistance[i - 1] + (vertices[uiGridVertexCount + i].m_vPosition - vertices[uiGridVertexCount + i - 1].m_vPosition).GetLength();
-
-    const float fGridWidth = gridDistance.PeekBack();
-    const float fShoreWidth = shoreDistance.PeekBack();
-    if (fGridWidth <= plMath::SmallEpsilon<float>() || fShoreWidth <= plMath::SmallEpsilon<float>())
-      return;
-
-    plUInt32 grid = 0;
-    plUInt32 shore = 0;
-    while (grid + 1 < uiPatchColumns || shore + 1 < uiLakeBoundaryVertexCount)
-    {
-      const float fNextGrid = grid + 1 < uiPatchColumns ? gridDistance[grid + 1] / fGridWidth : plMath::HighValue<float>();
-      const float fNextShore = shore + 1 < uiLakeBoundaryVertexCount ? shoreDistance[shore + 1] / fShoreWidth : plMath::HighValue<float>();
-      if (fNextGrid <= fNextShore)
-      {
-        indices.PushBack(uiLastGridRow + grid);
-        indices.PushBack(uiLastGridRow + grid + 1);
-        indices.PushBack(uiGridVertexCount + shore);
-        ++grid;
-      }
-      else
-      {
-        indices.PushBack(uiLastGridRow + grid);
-        indices.PushBack(uiGridVertexCount + shore + 1);
-        indices.PushBack(uiGridVertexCount + shore);
-        ++shore;
-      }
-    }
-  }
-
-  // ---------------------------------------------------------------------------------------------------------
-  // Merged junction remesh. Overlaying a separate patch draw on the river (analytic cutout + overlap margin)
-  // leaves a visible split: two transparent surfaces double-blend inside the overlap band and the discard
-  // boundary is a hard straight edge. Instead, cut the river's terminal segment for real and emit ONE
-  // continuous mesh containing the kept river ribbon, the transition patch and the duplicated lake shoreline.
-  // The weld row is shared by INDEX rather than duplicated, so a single draw carries one set of profile
-  // constants, one displacement evaluation and one tessellation domain across the whole transition.
-  // Requires the river to participate in no other junction, because the junction constants can only express
-  // a single secondary profile per draw; multi-junction rivers keep the legacy overlap path.
-  bool bMerged = false;
-  {
-    bool bRiverHasOtherJunction = false;
-    for (const JunctionSlot& other : m_Junctions)
-    {
-      if (&other == &slot || !other.m_bInUse)
-        continue;
-      if (other.m_Data.m_BodyA == pRiver->m_BodyId || other.m_Data.m_BodyB == pRiver->m_BodyId)
-      {
-        bRiverHasOtherJunction = true;
-        break;
-      }
-    }
-
-    const plUInt32 uiKeptRows = bAttachAtEnd ? uiStartRow + 1 : uiRows - uiStartRow;
-    if (!bRiverHasOtherJunction && uiKeptRows >= 2)
-    {
-      const plUInt32 uiKeptVertexCount = uiKeptRows * uiColumns;
-      const plUInt32 uiRiverCopyOffset = bAttachAtEnd ? 0 : uiStartRow * uiColumns;
-      const plUInt32 uiWeldRowBase = bAttachAtEnd ? (uiKeptRows - 1) * uiColumns : 0;
-
-      plDynamicArray<plWaterGeometryVertex> mergedVertices;
-      mergedVertices.Reserve(uiKeptVertexCount + vertices.GetCount() - uiPatchColumns);
-      for (plUInt32 i = 0; i < uiKeptVertexCount; ++i)
-        mergedVertices.PushBack(pRiver->m_Vertices[uiRiverCopyOffset + i]);
-      // Patch rows 1..N and the duplicated lake shoreline keep their original order. Row 0 is NOT copied:
-      // those are the weld vertices, which the merged mesh indexes directly inside the kept river ribbon.
-      for (plUInt32 i = uiPatchColumns; i < vertices.GetCount(); ++i)
-        mergedVertices.PushBack(vertices[i]);
-
-      // The patch's row 0 was copied from the river in patch-column order (possibly mirrored); route those
-      // indices back onto the shared river weld row so the strip continues the river topologically.
-      auto RemapPatchIndex = [&](plUInt32 uiIndex) -> plUInt32
-      {
-        if (uiIndex < uiPatchColumns)
-          return uiWeldRowBase + (bRowForward ? uiIndex : uiColumns - 1 - uiIndex);
-        return uiKeptVertexCount + (uiIndex - uiPatchColumns);
-      };
-
-      plDynamicArray<plUInt32> mergedIndices;
-      mergedIndices.Reserve((uiKeptRows - 1) * (uiColumns - 1) * 6 + indices.GetCount());
-      for (plUInt32 row = 0; row + 1 < uiKeptRows; ++row)
-      {
-        for (plUInt32 column = 0; column + 1 < uiColumns; ++column)
-        {
-          const plUInt32 i0 = row * uiColumns + column;
-          const plUInt32 i1 = i0 + 1;
-          const plUInt32 i2 = i0 + uiColumns;
-          const plUInt32 i3 = i2 + 1;
-          mergedIndices.PushBack(i0); mergedIndices.PushBack(i1); mergedIndices.PushBack(i2);
-          mergedIndices.PushBack(i1); mergedIndices.PushBack(i3); mergedIndices.PushBack(i2);
-        }
-      }
-      for (plUInt32 i = 0; i < indices.GetCount(); ++i)
-        mergedIndices.PushBack(RemapPatchIndex(indices[i]));
-
-      // The merged volume derives its side skirt from the actual stitched perimeter (river far end, banks,
-      // patch sides, lake shoreline). Orient it counter-clockwise to match the authored-boundary convention.
-      plDynamicArray<plUInt32> mergedBoundaryLoop;
-      if (BuildBoundaryLoop(mergedVertices, mergedIndices, mergedBoundaryLoop))
-      {
-        float fMergedSignedArea = 0.0f;
-        for (plUInt32 i = 0; i < mergedBoundaryLoop.GetCount(); ++i)
-        {
-          const plVec2 a = mergedVertices[mergedBoundaryLoop[i]].m_vPosition.GetAsVec2();
-          const plVec2 b = mergedVertices[mergedBoundaryLoop[(i + 1) % mergedBoundaryLoop.GetCount()]].m_vPosition.GetAsVec2();
-          fMergedSignedArea += a.x * b.y - b.x * a.y;
-        }
-        plDynamicArray<plVec3> mergedBoundary;
-        mergedBoundary.Reserve(mergedBoundaryLoop.GetCount());
-        for (plUInt32 i = 0; i < mergedBoundaryLoop.GetCount(); ++i)
-        {
-          const plUInt32 uiLoopIndex = fMergedSignedArea >= 0.0f ? i : mergedBoundaryLoop.GetCount() - 1 - i;
-          mergedBoundary.PushBack(mergedVertices[mergedBoundaryLoop[uiLoopIndex]].m_vPosition);
-        }
-
-        plDynamicArray<plWaterGeometryVertex> mergedVolumeVertices;
-        plDynamicArray<plUInt32> mergedVolumeIndices;
-        if (BuildFiniteWaterVolume(mergedVertices, mergedIndices, pRiver->m_Descriptor.m_fDefaultDepth,
-              mergedVolumeVertices, mergedVolumeIndices, false, mergedBoundary))
-        {
-          const plUInt64 uiMergedResourceKey = (static_cast<plUInt64>(pRiver->m_BodyId.m_uiIndex) << 32) | pSecondary->m_BodyId.m_uiIndex;
-          plStringBuilder mergedSurfaceSuffix, mergedVolumeSuffix;
-          mergedSurfaceSuffix.SetFormat("JunctionMergedSurface_{}_{}_{}", slot.m_Data.m_vCenter.x, slot.m_Data.m_vCenter.y, uiRevision);
-          mergedVolumeSuffix.SetFormat("JunctionMergedVolume_{}_{}_{}", slot.m_Data.m_vCenter.x, slot.m_Data.m_vCenter.y, uiRevision);
-          slot.m_RenderData.m_hMergedSurfaceMesh = CreateFiniteWaterMesh(mergedVertices, mergedIndices, uiMergedResourceKey, uiRevision, mergedSurfaceSuffix);
-          slot.m_RenderData.m_hMergedVolumeMesh = CreateFiniteWaterMesh(mergedVolumeVertices, mergedVolumeIndices, uiMergedResourceKey, uiRevision, mergedVolumeSuffix);
-          slot.m_RenderData.m_uiMergedSurfacePrimitiveCount = mergedIndices.GetCount() / 3;
-          slot.m_RenderData.m_uiMergedVolumePrimitiveCount = mergedVolumeIndices.GetCount() / 3;
-          bMerged = slot.m_RenderData.m_hMergedSurfaceMesh.IsValid() && slot.m_RenderData.m_hMergedVolumeMesh.IsValid();
-          if (!bMerged)
-          {
-            slot.m_RenderData.m_hMergedSurfaceMesh.Invalidate();
-            slot.m_RenderData.m_hMergedVolumeMesh.Invalidate();
-            slot.m_RenderData.m_uiMergedSurfacePrimitiveCount = 0;
-            slot.m_RenderData.m_uiMergedVolumePrimitiveCount = 0;
-          }
-        }
-      }
-    }
-  }
-  slot.m_RenderData.m_bMergedIntoPrimary = bMerged;
-
-  if (!bMerged)
-  {
-    plDynamicArray<plWaterGeometryVertex> volumeVertices;
-    plDynamicArray<plUInt32> volumeIndices;
-    plDynamicArray<plVec3> patchVolumeBoundary;
-    if (bLakeReceiver)
-    {
-      patchVolumeBoundary.Reserve(uiPatchColumns + uiLakeBoundaryVertexCount + uiPatchRows * 2);
-      for (plUInt32 column = 0; column < uiPatchColumns; ++column)
-        patchVolumeBoundary.PushBack(vertices[column].m_vPosition);
-      for (plUInt32 row = 1; row < uiPatchRows; ++row)
-        patchVolumeBoundary.PushBack(vertices[row * uiPatchColumns + uiPatchColumns - 1].m_vPosition);
-      for (plUInt32 i = uiLakeBoundaryVertexCount; i-- > 0;)
-        patchVolumeBoundary.PushBack(vertices[uiGridVertexCount + i].m_vPosition);
-      for (plUInt32 row = uiPatchRows; row-- > 1;)
-        patchVolumeBoundary.PushBack(vertices[row * uiPatchColumns].m_vPosition);
-    }
-    if (!BuildFiniteWaterVolume(vertices, indices, pRiver->m_Descriptor.m_fDefaultDepth, volumeVertices, volumeIndices,
-          !bLakeReceiver, patchVolumeBoundary))
-      return;
-    const plUInt64 uiResourceKey = (static_cast<plUInt64>(pRiver->m_BodyId.m_uiIndex) << 32) | pSecondary->m_BodyId.m_uiIndex;
-    plStringBuilder surfaceSuffix, volumeSuffix;
-    surfaceSuffix.SetFormat("JunctionSurface_{}_{}_{}", slot.m_Data.m_vCenter.x, slot.m_Data.m_vCenter.y, uiRevision);
-    volumeSuffix.SetFormat("JunctionVolume_{}_{}_{}", slot.m_Data.m_vCenter.x, slot.m_Data.m_vCenter.y, uiRevision);
-
-    slot.m_RenderData.m_hSurfaceMesh = CreateFiniteWaterMesh(vertices, indices, uiResourceKey, uiRevision, surfaceSuffix);
-    slot.m_RenderData.m_hVolumeMesh = CreateFiniteWaterMesh(volumeVertices, volumeIndices, uiResourceKey, uiRevision, volumeSuffix);
-    slot.m_RenderData.m_uiSurfacePrimitiveCount = indices.GetCount() / 3;
-    slot.m_RenderData.m_uiVolumePrimitiveCount = volumeIndices.GetCount() / 3;
-  }
-  slot.m_RenderData.m_PrimaryBody = pRiver->m_BodyId;
-  slot.m_RenderData.m_SecondaryBody = pSecondary->m_BodyId;
-  slot.m_RenderData.m_PrimaryProfile = pRiver->m_Profile;
-  slot.m_RenderData.m_SecondaryProfile = pSecondary->m_Profile;
-  slot.m_RenderData.m_SecondaryType = pSecondary->m_Descriptor.m_Type;
-  slot.m_RenderData.m_vCutoutCenter = ((startCenter + endCenter) * 0.5f).GetAsVec2();
-  slot.m_RenderData.m_vCutoutDirection = cutoutDirection;
-  slot.m_RenderData.m_fCutoutHalfLength = fPatchLength * 0.5f;
-  slot.m_RenderData.m_fStartHalfWidth = fStartHalfWidth;
-  slot.m_RenderData.m_fEndHalfWidth = fEndHalfWidth;
-  slot.m_RenderData.m_vFlowFieldOrigin = shorelinePoint.GetAsVec2();
-  slot.m_RenderData.m_vFlowFieldDirection = receiverAdvance;
-  slot.m_RenderData.m_fFlowFieldLength = fFlowFieldLength;
-  slot.m_RenderData.m_fFlowFieldHalfWidth = fFlowFieldHalfWidth;
-  slot.m_RenderData.m_fFlowFieldSpeed = fRiverPush;
-  slot.m_RenderData.m_fFlowFieldDirectionSign = fFlowDirectionSign;
-  if (bLakeReceiver)
-  {
-    slot.m_RenderData.m_vStitchedLakeLeft = endLeft.GetAsVec2();
-    slot.m_RenderData.m_vStitchedLakeRight = endRight.GetAsVec2();
-    slot.m_RenderData.m_uiStitchedRiverVertexCount = uiPatchColumns;
-    slot.m_RenderData.m_uiStitchedLakeVertexCount = uiLakeBoundaryVertexCount;
-    slot.m_RenderData.m_fMaximumLakeSeamError = fMaximumLakeSeamError;
-    slot.m_RenderData.m_fLakeMaterialConvergenceDistance = fPatchLength / static_cast<float>(uiPatchSegments);
-  }
-  // Keep a full ring of patch geometry under the river at the copied weld row. The receiving lake is not cut:
-  // its exact shoreline vertices form the other edge of the transition.
-  slot.m_RenderData.m_fCutoutMargin = plMath::Max(fCellSize * 1.5f, 0.25f);
-  const bool bSecondarySpectrum = pSecondary->m_Descriptor.m_Type == plWaterBodyType::Ocean ||
-                                  (pSecondary->m_Descriptor.m_Type == plWaterBodyType::Lake && pSecondary->m_Profile.m_bEnableLakeSpectrum);
-  slot.m_RenderData.m_uiSecondaryGpuCascadeCount = bSecondarySpectrum ? pSecondary->m_Profile.m_uiGpuCascadeCount : 0;
-  slot.m_RenderData.m_bValid = slot.m_RenderData.m_bMergedIntoPrimary ||
-                               (slot.m_RenderData.m_hSurfaceMesh.IsValid() && slot.m_RenderData.m_hVolumeMesh.IsValid());
-}
-
-void plWaterWorldModule::PrepareOtherJunctions(const JunctionSlot* pExcept)
-{
-  // Merge eligibility depends on how many junctions reference a river, so any junction lifecycle change can
-  // flip a sibling between the merged remesh and the legacy overlap patch. Junction counts are tiny and
-  // changes are edit-time events; re-preparing all other junctions keeps every slot's state consistent.
-  for (JunctionSlot& junction : m_Junctions)
-  {
-    if (junction.m_bInUse && &junction != pExcept)
-      PrepareJunction(junction);
   }
 }
 
 void plWaterWorldModule::PrepareBody(BodySlot& slot, const plWaterBodyDescriptor& descriptor)
 {
+  // The descriptor, the resolved profile and, for an ocean, its clipmap. The meshes of rivers and lakes are built per
+  // network (RebuildNetworks), because where a river meets a lake both meshes depend on each other.
   const plWaterBodyId oldId = slot.m_Data.m_BodyId;
-  const plUInt32 uiGeometryRevision = slot.m_Data.m_uiGeometryRevision + 1;
+  const plWaterBodySnapshot previous = std::move(slot.m_Data);
   slot.m_Data = plWaterBodySnapshot();
   slot.m_Data.m_BodyId = oldId;
-  slot.m_Data.m_uiGeometryRevision = uiGeometryRevision;
+  slot.m_Data.m_uiGeometryRevision = previous.m_uiGeometryRevision;
   slot.m_Data.m_Descriptor = descriptor;
   slot.m_Data.m_Descriptor.m_fDefaultWidth = plMath::Max(descriptor.m_fDefaultWidth, 0.01f);
   slot.m_Data.m_Descriptor.m_fDefaultDepth = plMath::Max(descriptor.m_fDefaultDepth, 0.01f);
@@ -1486,132 +864,349 @@ void plWaterWorldModule::PrepareBody(BodySlot& slot, const plWaterBodyDescriptor
   if (descriptor.m_bOverrideWaveAmplitude)
     slot.m_Data.m_Profile.m_fWaveAmplitude = plMath::Max(descriptor.m_fWaveAmplitudeOverride, 0.0f);
 
-  plWaterFiniteMeshSettings meshSettings;
-  meshSettings.m_fTargetEdgeLength = plMath::Clamp(slot.m_Data.m_Profile.m_fFiniteMeshCellSize, 0.1f, 20.0f);
-  meshSettings.m_uiMaxRiverCrossSubdivisions = plMath::Clamp<plUInt16>(slot.m_Data.m_Profile.m_uiMaxRiverCrossSubdivisions, 2, 128);
-  meshSettings.m_fShoreWaveFadeDistance = plMath::Clamp(slot.m_Data.m_Profile.m_fShoreWaveFadeDistance, 0.01f, 100.0f);
-  meshSettings.m_fRiverCurvatureRefinement = plMath::Saturate(slot.m_Data.m_Profile.m_fRiverCurvatureRefinement);
-
-  switch (descriptor.m_Type.GetValue())
+  if (descriptor.m_Type == plWaterBodyType::Ocean)
   {
-    case plWaterBodyType::Ocean:
-    {
-      plWaterGeometry::BuildOceanClipmap(slot.m_Data.m_Descriptor.m_uiOceanRingCount, slot.m_Data.m_Descriptor.m_uiPatchResolution,
-        slot.m_Data.m_Descriptor.m_fOceanPatchSize, slot.m_Data.m_OceanPatches);
-      const float fExtent = slot.m_Data.m_Descriptor.m_fOceanExtent;
-      const float fHeightMargin = slot.m_Data.m_Profile.m_fWaveAmplitude * 2.0f + 1.0f;
-      slot.m_Data.m_WorldBounds = plBoundingBox::MakeFromMinMax(
-        plVec3(-fExtent, -fExtent, descriptor.m_fBaseHeight - slot.m_Data.m_Descriptor.m_fDefaultDepth),
-        plVec3(fExtent, fExtent, descriptor.m_fBaseHeight + fHeightMargin));
-      slot.m_Data.m_bGeometryValid = !slot.m_Data.m_OceanPatches.IsEmpty();
-      break;
-    }
-
-    case plWaterBodyType::River:
-    {
-      slot.m_Data.m_bGeometryValid = plWaterGeometry::BuildRiverRibbon(descriptor.m_ControlPoints, slot.m_Data.m_Vertices, slot.m_Data.m_Indices, meshSettings).Succeeded();
-      break;
-    }
-
-    case plWaterBodyType::Lake:
-    {
-      plDynamicArray<plVec3> boundary;
-      boundary.Reserve(descriptor.m_ControlPoints.GetCount());
-      for (const plWaterControlPoint& point : descriptor.m_ControlPoints)
-        boundary.PushBack(point.m_vPosition);
-      slot.m_Data.m_bGeometryValid = plWaterGeometry::TriangulateLake(boundary, slot.m_Data.m_Vertices, slot.m_Data.m_Indices, 0.001f, meshSettings).Succeeded();
-      break;
-    }
+    ++slot.m_Data.m_uiGeometryRevision;
+    plWaterGeometry::BuildOceanClipmap(slot.m_Data.m_Descriptor.m_uiOceanRingCount, slot.m_Data.m_Descriptor.m_uiPatchResolution,
+      slot.m_Data.m_Descriptor.m_fOceanPatchSize, slot.m_Data.m_OceanPatches);
+    const float fExtent = slot.m_Data.m_Descriptor.m_fOceanExtent;
+    const float fHeightMargin = slot.m_Data.m_Profile.m_fWaveAmplitude * 2.0f + 1.0f;
+    slot.m_Data.m_WorldBounds = plBoundingBox::MakeFromMinMax(
+      plVec3(-fExtent, -fExtent, descriptor.m_fBaseHeight - slot.m_Data.m_Descriptor.m_fDefaultDepth),
+      plVec3(fExtent, fExtent, descriptor.m_fBaseHeight + fHeightMargin));
+    slot.m_Data.m_bGeometryValid = !slot.m_Data.m_OceanPatches.IsEmpty();
+    return;
   }
 
-  if (descriptor.m_Type != plWaterBodyType::Ocean && slot.m_Data.m_bGeometryValid)
+  if (previous.m_Descriptor.m_Type != descriptor.m_Type)
+    return;
+
+  // A river or lake keeps the meshes it has until its network is rebuilt. If the new outline cannot be meshed, they
+  // stay: a body that was visible does not vanish while its spline is being repaired.
+  slot.m_Data.m_Vertices = previous.m_Vertices;
+  slot.m_Data.m_Indices = previous.m_Indices;
+  slot.m_Data.m_hSurfaceMesh = previous.m_hSurfaceMesh;
+  slot.m_Data.m_hVolumeMesh = previous.m_hVolumeMesh;
+  slot.m_Data.m_FiniteMeshLods = previous.m_FiniteMeshLods;
+  slot.m_Data.m_WorldBounds = previous.m_WorldBounds;
+  slot.m_Data.m_bGeometryValid = previous.m_bGeometryValid;
+}
+
+bool plWaterWorldModule::ResolveJoin(const JunctionSlot& junction, plUInt32& out_uiRiver, plUInt32& out_uiReceiver, bool& out_bRiverEnd) const
+{
+  if (!junction.m_bInUse || !IsBodyIdValid(junction.m_Data.m_BodyA) || !IsBodyIdValid(junction.m_Data.m_BodyB))
+    return false;
+
+  const plWaterBodySnapshot& bodyA = m_Bodies[junction.m_Data.m_BodyA.m_uiIndex].m_Data;
+  const plWaterBodySnapshot& bodyB = m_Bodies[junction.m_Data.m_BodyB.m_uiIndex].m_Data;
+  plVec3 vRiverAnchor;
+  if (bodyA.m_Descriptor.m_Type == plWaterBodyType::River && bodyB.m_Descriptor.m_Type != plWaterBodyType::River)
   {
-    plDynamicArray<plVec3> volumeBoundary;
-    if (descriptor.m_Type == plWaterBodyType::Lake)
-    {
-      volumeBoundary.Reserve(descriptor.m_ControlPoints.GetCount());
-      for (const plWaterControlPoint& point : descriptor.m_ControlPoints)
-        volumeBoundary.PushBack(point.m_vPosition);
-      if (volumeBoundary.GetCount() > 2 && volumeBoundary[0].IsEqual(volumeBoundary.PeekBack(), 0.001f))
-        volumeBoundary.PopBack();
-    }
-    if (!BuildFiniteWaterVolume(slot.m_Data.m_Vertices, slot.m_Data.m_Indices, slot.m_Data.m_Descriptor.m_fDefaultDepth,
-          slot.m_Data.m_VolumeVertices, slot.m_Data.m_VolumeIndices, descriptor.m_Type == plWaterBodyType::River, volumeBoundary))
-    {
-      slot.m_Data.m_bGeometryValid = false;
-      plLog::Warning("Water body '{}' produced invalid or oversized finite topology; volume generation was skipped.", descriptor.m_uiNetworkId);
-      return;
-    }
-    slot.m_Data.m_hSurfaceMesh = CreateFiniteWaterMesh(slot.m_Data.m_Vertices, slot.m_Data.m_Indices,
-      descriptor.m_uiNetworkId, uiGeometryRevision, "Surface");
-    slot.m_Data.m_hVolumeMesh = CreateFiniteWaterMesh(slot.m_Data.m_VolumeVertices, slot.m_Data.m_VolumeIndices,
-      descriptor.m_uiNetworkId, uiGeometryRevision, "Volume");
-    const plUInt32 uiVolumePrimitiveCount = slot.m_Data.m_VolumeIndices.GetCount() / 3;
-    slot.m_Data.m_bGeometryValid = slot.m_Data.m_bGeometryValid && slot.m_Data.m_hSurfaceMesh.IsValid() && slot.m_Data.m_hVolumeMesh.IsValid();
+    out_uiRiver = junction.m_Data.m_BodyA.m_uiIndex;
+    out_uiReceiver = junction.m_Data.m_BodyB.m_uiIndex;
+    vRiverAnchor = junction.m_Data.m_vAnchorA;
+  }
+  else if (bodyB.m_Descriptor.m_Type == plWaterBodyType::River && bodyA.m_Descriptor.m_Type != plWaterBodyType::River)
+  {
+    out_uiRiver = junction.m_Data.m_BodyB.m_uiIndex;
+    out_uiReceiver = junction.m_Data.m_BodyA.m_uiIndex;
+    vRiverAnchor = junction.m_Data.m_vAnchorB;
+  }
+  else
+  {
+    // Lake to lake, lake to ocean and river to river have no mesh of their own. Queries still blend across them.
+    return false;
+  }
 
-    if (slot.m_Data.m_bGeometryValid)
+  const auto& points = m_Bodies[out_uiRiver].m_Data.m_Descriptor.m_ControlPoints;
+  if (points.GetCount() < 2)
+    return false;
+  out_bRiverEnd = (points.PeekBack().m_vPosition - vRiverAnchor).GetLengthSquared() < (points[0].m_vPosition - vRiverAnchor).GetLengthSquared();
+  return true;
+}
+
+void plWaterWorldModule::CollectNetwork(plUInt32 uiSeedBody, plDynamicArray<plUInt32>& out_bodies, plDynamicArray<plUInt32>& out_junctions) const
+{
+  out_bodies.Clear();
+  out_junctions.Clear();
+  if (uiSeedBody >= m_Bodies.GetCount() || !m_Bodies[uiSeedBody].m_bInUse || m_Bodies[uiSeedBody].m_Data.m_Descriptor.m_Type == plWaterBodyType::Ocean)
+    return;
+
+  out_bodies.PushBack(uiSeedBody);
+  for (plUInt32 uiNext = 0; uiNext < out_bodies.GetCount(); ++uiNext)
+  {
+    const plUInt32 uiBody = out_bodies[uiNext];
+    for (plUInt32 uiJunction = 0; uiJunction < m_Junctions.GetCount(); ++uiJunction)
     {
-      plWaterFiniteMeshLod& lod0 = slot.m_Data.m_FiniteMeshLods.ExpandAndGetRef();
-      lod0.m_hSurfaceMesh = slot.m_Data.m_hSurfaceMesh;
-      lod0.m_hVolumeMesh = slot.m_Data.m_hVolumeMesh;
-      lod0.m_uiSurfacePrimitiveCount = slot.m_Data.m_Indices.GetCount() / 3;
-      lod0.m_uiVolumePrimitiveCount = uiVolumePrimitiveCount;
-      lod0.m_fMaximumDistanceScale = 2.0f;
+      plUInt32 uiRiver = 0;
+      plUInt32 uiReceiver = 0;
+      bool bRiverEnd = false;
+      if (!ResolveJoin(m_Junctions[uiJunction], uiRiver, uiReceiver, bRiverEnd) || (uiRiver != uiBody && uiReceiver != uiBody))
+        continue;
 
-      for (plUInt32 uiLod = 1; uiLod < 3; ++uiLod)
-      {
-        plWaterFiniteMeshSettings lodSettings = meshSettings;
-        lodSettings.m_fTargetEdgeLength *= static_cast<float>(1u << uiLod);
-        lodSettings.m_uiMaxRiverCrossSubdivisions = plMath::Max<plUInt16>(2, meshSettings.m_uiMaxRiverCrossSubdivisions >> uiLod);
-        plDynamicArray<plWaterGeometryVertex> lodVertices;
-        plDynamicArray<plUInt32> lodIndices;
-        plResult buildResult = PL_FAILURE;
-        if (descriptor.m_Type == plWaterBodyType::River)
-        {
-          buildResult = plWaterGeometry::BuildRiverRibbon(descriptor.m_ControlPoints, lodVertices, lodIndices, lodSettings);
-        }
-        else
-        {
-          plDynamicArray<plVec3> boundary;
-          boundary.Reserve(descriptor.m_ControlPoints.GetCount());
-          for (const plWaterControlPoint& point : descriptor.m_ControlPoints)
-            boundary.PushBack(point.m_vPosition);
-          buildResult = plWaterGeometry::TriangulateLake(boundary, lodVertices, lodIndices, 0.001f, lodSettings);
-        }
-        if (buildResult.Failed())
-          break;
-
-        plDynamicArray<plWaterGeometryVertex> lodVolumeVertices;
-        plDynamicArray<plUInt32> lodVolumeIndices;
-        if (!BuildFiniteWaterVolume(lodVertices, lodIndices, slot.m_Data.m_Descriptor.m_fDefaultDepth, lodVolumeVertices, lodVolumeIndices,
-              descriptor.m_Type == plWaterBodyType::River, volumeBoundary))
-          break;
-        plStringBuilder surfaceSuffix, volumeSuffix;
-        surfaceSuffix.SetFormat("SurfaceLod{}", uiLod);
-        volumeSuffix.SetFormat("VolumeLod{}", uiLod);
-        plWaterFiniteMeshLod lod;
-        lod.m_hSurfaceMesh = CreateFiniteWaterMesh(lodVertices, lodIndices, descriptor.m_uiNetworkId, uiGeometryRevision, surfaceSuffix);
-        lod.m_hVolumeMesh = CreateFiniteWaterMesh(lodVolumeVertices, lodVolumeIndices, descriptor.m_uiNetworkId, uiGeometryRevision, volumeSuffix);
-        if (!lod.m_hSurfaceMesh.IsValid() || !lod.m_hVolumeMesh.IsValid())
-          break;
-        lod.m_uiSurfacePrimitiveCount = lodIndices.GetCount() / 3;
-        lod.m_uiVolumePrimitiveCount = lodVolumeIndices.GetCount() / 3;
-        lod.m_fMaximumDistanceScale = uiLod == 1 ? 6.0f : plMath::HighValue<float>();
-        slot.m_Data.m_FiniteMeshLods.PushBack(lod);
-      }
+      if (!out_junctions.Contains(uiJunction))
+        out_junctions.PushBack(uiJunction);
+      // The ocean is not a member of a network: a river only borrows its level and its profile for the apron.
+      const plUInt32 uiOther = uiRiver == uiBody ? uiReceiver : uiRiver;
+      if (m_Bodies[uiOther].m_Data.m_Descriptor.m_Type != plWaterBodyType::Ocean && !out_bodies.Contains(uiOther))
+        out_bodies.PushBack(uiOther);
     }
-    // Mesh resources own the uploaded proxy. Retaining another CPU copy made every render snapshot
-    // duplicate the full volume topology and amplified memory use during editor spline rebuilds.
-    slot.m_Data.m_VolumeVertices.Clear();
-    slot.m_Data.m_VolumeVertices.Compact();
-    slot.m_Data.m_VolumeIndices.Clear();
-    slot.m_Data.m_VolumeIndices.Compact();
-    slot.m_Data.m_WorldBounds = plBoundingBox::MakeInvalid();
-    for (const plWaterGeometryVertex& vertex : slot.m_Data.m_Vertices)
-      slot.m_Data.m_WorldBounds.ExpandToInclude(vertex.m_vPosition);
-    slot.m_Data.m_WorldBounds.Grow(plVec3(0.1f, 0.1f, slot.m_Data.m_Descriptor.m_fDefaultDepth + slot.m_Data.m_Profile.m_fWaveAmplitude * 2.0f));
   }
 }
+
+void plWaterWorldModule::RebuildNetworks(plArrayPtr<const plUInt32> seedBodies, bool bDraft)
+{
+  plHybridArray<plUInt32, 16> done;
+  plDynamicArray<plUInt32> networkBodies;
+  plDynamicArray<plUInt32> networkJunctions;
+  for (plUInt32 uiSeed : seedBodies)
+  {
+    if (done.Contains(uiSeed))
+      continue;
+    CollectNetwork(uiSeed, networkBodies, networkJunctions);
+    if (networkBodies.IsEmpty())
+      continue;
+    for (plUInt32 uiBody : networkBodies)
+      done.PushBack(uiBody);
+    RebuildNetwork(networkBodies, networkJunctions, bDraft);
+  }
+}
+
+void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies, plArrayPtr<const plUInt32> networkJunctions, bool bDraft)
+{
+  if (!bDraft)
+  {
+    // The full meshes are being built now, whatever asked for them.
+    for (plUInt32 uiBody : networkBodies)
+      m_BodiesAwaitingFullMeshes.RemoveAndSwap(uiBody);
+  }
+
+  // What the mesher needs of each body.
+  plDynamicArray<plWaterNetworkBody> bodies;
+  bodies.SetCount(networkBodies.GetCount());
+  for (plUInt32 i = 0; i < networkBodies.GetCount(); ++i)
+  {
+    const plWaterBodySnapshot& source = m_Bodies[networkBodies[i]].m_Data;
+    plWaterNetworkBody& body = bodies[i];
+    body.m_Type = source.m_Descriptor.m_Type;
+    body.m_uiProfileIndex = static_cast<plUInt8>(plMath::Min<plUInt32>(networkBodies[i], WATER_MAX_PROFILES - 1));
+    body.m_Points = source.m_Descriptor.m_ControlPoints;
+    body.m_fDefaultDepth = source.m_Descriptor.m_fDefaultDepth;
+    body.m_Settings.m_fTargetEdgeLength = plMath::Clamp(source.m_Profile.m_fFiniteMeshCellSize, 0.1f, 20.0f);
+    body.m_Settings.m_uiMaxRiverCrossSubdivisions = plMath::Clamp<plUInt16>(source.m_Profile.m_uiMaxRiverCrossSubdivisions, 2, 128);
+    body.m_Settings.m_fShoreWaveFadeDistance = plMath::Clamp(source.m_Profile.m_fShoreWaveFadeDistance, 0.01f, 100.0f);
+    body.m_Settings.m_fRiverCurvatureRefinement = plMath::Saturate(source.m_Profile.m_fRiverCurvatureRefinement);
+  }
+
+  // And of each junction that joins a river of the network to a lake of it, or to an ocean.
+  struct JoinSource
+  {
+    PL_DECLARE_POD_TYPE();
+
+    plUInt32 m_uiJunction;
+    plUInt32 m_uiRiverBody;
+    plUInt32 m_uiReceiverBody;
+    float m_fRiverPush;
+    float m_fDirectionSign;
+  };
+  plDynamicArray<plWaterNetworkJoin> joins;
+  plDynamicArray<JoinSource> joinSources;
+  for (plUInt32 uiJunction : networkJunctions)
+  {
+    JunctionSlot& junction = m_Junctions[uiJunction];
+    plUInt32 uiRiver = 0;
+    plUInt32 uiReceiver = 0;
+    bool bRiverEnd = false;
+    if (!ResolveJoin(junction, uiRiver, uiReceiver, bRiverEnd))
+      continue;
+
+    const plWaterBodySnapshot& river = m_Bodies[uiRiver].m_Data;
+    const plWaterBodySnapshot& receiver = m_Bodies[uiReceiver].m_Data;
+    const bool bOcean = receiver.m_Descriptor.m_Type == plWaterBodyType::Ocean;
+    const plWaterControlPoint& endPoint = bRiverEnd ? river.m_Descriptor.m_ControlPoints.PeekBack() : river.m_Descriptor.m_ControlPoints[0];
+
+    // The river pushes out with its current, the receiver pushes back with its waves. Whichever is stronger owns more
+    // of the mouth line, and how hard both push decides how much the mouth churns.
+    const float fFlowScalar = river.m_Descriptor.m_fFlowSpeed * river.m_Profile.m_fFlowScale;
+    const float fRiverPush = plMath::Abs(fFlowScalar) * plMath::Max(endPoint.m_fFlowScale, 0.0f);
+    const float fWavePush = plMath::Max(receiver.m_Profile.m_fWaveAmplitude, 0.0f) * plMath::Max(receiver.m_Profile.m_fWindSpeed, 0.1f);
+    const float fPushback = fWavePush / plMath::Max(fWavePush + fRiverPush, 0.0001f);
+    // Water enters the receiver at a river's end and leaves it at a river's start, unless the flow speed is negative.
+    const bool bInflow = bRiverEnd == (fFlowScalar >= 0.0f);
+    const float fBlend = plMath::Max(junction.m_Data.m_fBlendDistance, 0.5f);
+    const float fRiverWidth = endPoint.m_fLeftWidth + endPoint.m_fRightWidth;
+
+    plWaterNetworkJoin& join = joins.ExpandAndGetRef();
+    join.m_uiRiver = networkBodies.IndexOf(uiRiver);
+    join.m_bRiverEnd = bRiverEnd;
+    join.m_uiLake = bOcean ? plInvalidIndex : networkBodies.IndexOf(uiReceiver);
+    join.m_uiOceanProfileIndex = static_cast<plUInt8>(plMath::Min<plUInt32>(uiReceiver, WATER_MAX_PROFILES - 1));
+    join.m_fOceanHeight = receiver.m_Descriptor.m_fBaseHeight;
+    if (bInflow)
+    {
+      join.m_fMixLengthRiver = fBlend * 0.4f;
+      join.m_fMixLengthReceiver = bOcean ? plMath::Max(fBlend * 1.5f, fRiverWidth * 2.5f) : fBlend;
+      join.m_fMouthWeight = plMath::Lerp(0.35f, 0.65f, fPushback);
+    }
+    else
+    {
+      // The receiver's water runs into the river: its look reaches up the river, and the river's hardly into it.
+      join.m_fMixLengthRiver = fBlend;
+      join.m_fMixLengthReceiver = bOcean ? plMath::Max(fBlend, fRiverWidth * 1.5f) : fBlend * 0.3f;
+      join.m_fMouthWeight = 0.75f;
+    }
+    // The junction component has already checked its own snap radius. This one only has to cover the same ground.
+    join.m_fSnapRadius = (junction.m_Data.m_vAnchorA - junction.m_Data.m_vAnchorB).GetLength() + fRiverWidth + 1.0f;
+    join.m_fHeightTolerance = plMath::Max(junction.m_Data.m_fHeightTolerance, 0.01f);
+    join.m_fFrontBreakup = plMath::Saturate(junction.m_Data.m_fFrontBreakup);
+
+    JoinSource& source = joinSources.ExpandAndGetRef();
+    source.m_uiJunction = uiJunction;
+    source.m_uiRiverBody = uiRiver;
+    source.m_uiReceiverBody = uiReceiver;
+    source.m_fRiverPush = fRiverPush;
+    source.m_fDirectionSign = bInflow ? 1.0f : -1.0f;
+  }
+
+  // Three levels of detail, each a conforming network of its own. A draft is the coarsest of them alone.
+  constexpr plUInt32 uiLodCount = 3;
+  const plUInt32 uiFirstLod = bDraft ? uiLodCount - 1 : 0;
+  plWaterNetworkMesh meshes[uiLodCount];
+  for (plUInt32 uiLod = uiFirstLod; uiLod < uiLodCount; ++uiLod)
+    plWaterNetworkMesher::Build(bodies, joins, uiLod, meshes[uiLod]);
+
+  for (plUInt32 i = 0; i < networkBodies.GetCount(); ++i)
+  {
+    plWaterBodySnapshot& body = m_Bodies[networkBodies[i]].m_Data;
+    const plWaterNetworkPart& part = meshes[uiFirstLod].m_Parts[i];
+    if (!part.m_bValid)
+    {
+      if (body.m_bGeometryValid)
+        plLog::Warning("Water body {} cannot be meshed as it is now. It keeps its last mesh (revision {}) until its spline or profile is repaired.", networkBodies[i], body.m_uiGeometryRevision);
+      else
+        plLog::Warning("Water body {} cannot be meshed and is not drawn: {}.", networkBodies[i],
+          body.m_Descriptor.m_Type == plWaterBodyType::Lake ? "its outline has to be a closed, flat loop that does not cross itself" : "its spline needs at least two points");
+      continue;
+    }
+    if (part.m_uiFoldedTriangles > 0)
+      plLog::Warning("Water body {}: the river bends more tightly than it is wide, and {} triangles were left out where it folds over itself. Widen the bend or narrow the river there.", networkBodies[i], part.m_uiFoldedTriangles);
+
+    const plUInt32 uiRevision = body.m_uiGeometryRevision + 1;
+    plHybridArray<plWaterFiniteMeshLod, 3> lods;
+    bool bFailed = false;
+    for (plUInt32 uiLod = uiFirstLod; uiLod < uiLodCount; ++uiLod)
+    {
+      const plWaterNetworkPart& lodPart = meshes[uiLod].m_Parts[i];
+      if (!lodPart.m_bValid)
+        break;
+
+      plDynamicArray<plWaterGeometryVertex> volumeVertices;
+      plDynamicArray<plUInt32> volumeIndices;
+      if (!plWaterNetworkMesher::BuildVolume(lodPart.m_TopologyVertices, lodPart.m_TopologyIndices, body.m_Descriptor.m_fDefaultDepth, volumeVertices, volumeIndices))
+      {
+        bFailed = uiLod == uiFirstLod;
+        break;
+      }
+
+      plStringBuilder sSurface;
+      plStringBuilder sVolume;
+      sSurface.SetFormat("SurfaceLod{}", uiLod);
+      sVolume.SetFormat("VolumeLod{}", uiLod);
+      plWaterFiniteMeshLod lod;
+      lod.m_hSurfaceMesh = CreateFiniteWaterMesh(lodPart.m_Vertices, lodPart.m_Indices, body.m_Descriptor.m_uiNetworkId, uiRevision, sSurface);
+      lod.m_hVolumeMesh = CreateFiniteWaterMesh(volumeVertices, volumeIndices, body.m_Descriptor.m_uiNetworkId, uiRevision, sVolume);
+      if (!lod.m_hSurfaceMesh.IsValid() || !lod.m_hVolumeMesh.IsValid())
+      {
+        bFailed = uiLod == uiFirstLod;
+        break;
+      }
+      lod.m_uiLevel = static_cast<plUInt8>(uiLod);
+      lod.m_uiSurfacePrimitiveCount = lodPart.m_Indices.GetCount() / 3;
+      lod.m_uiVolumePrimitiveCount = volumeIndices.GetCount() / 3;
+      lod.m_fMaximumDistanceScale = uiLod == 0 ? 2.0f : (uiLod == 1 ? 6.0f : plMath::HighValue<float>());
+      lods.PushBack(lod);
+    }
+    if (bFailed || lods.IsEmpty())
+    {
+      plLog::Warning("Water body {} produced a mesh that is invalid or too large. It keeps what it had.", networkBodies[i]);
+      continue;
+    }
+    // The last level is used at any distance, whichever it is.
+    lods.PeekBack().m_fMaximumDistanceScale = plMath::HighValue<float>();
+
+    body.m_uiGeometryRevision = uiRevision;
+    body.m_Vertices = part.m_TopologyVertices;
+    body.m_Indices = part.m_TopologyIndices;
+    body.m_FiniteMeshLods = lods;
+    body.m_hSurfaceMesh = lods[0].m_hSurfaceMesh;
+    body.m_hVolumeMesh = lods[0].m_hVolumeMesh;
+    body.m_WorldBounds = plBoundingBox::MakeInvalid();
+    for (const plWaterGeometryVertex& vertex : body.m_Vertices)
+      body.m_WorldBounds.ExpandToInclude(vertex.m_vPosition);
+    body.m_WorldBounds.Grow(plVec3(0.1f, 0.1f, body.m_Descriptor.m_fDefaultDepth + body.m_Profile.m_fWaveAmplitude * 2.0f));
+    body.m_bGeometryValid = true;
+  }
+
+  // What each junction came to.
+  for (plUInt32 uiJunction : networkJunctions)
+  {
+    JunctionSlot& junction = m_Junctions[uiJunction];
+    const plUInt32 uiRevision = junction.m_RenderData.m_uiRevision + 1;
+    junction.m_RenderData = plWaterJunctionRenderSnapshot();
+    junction.m_RenderData.m_Descriptor = junction.m_Data;
+    junction.m_RenderData.m_uiRevision = uiRevision;
+  }
+  for (plUInt32 uiJoin = 0; uiJoin < joins.GetCount(); ++uiJoin)
+  {
+    const JoinSource& source = joinSources[uiJoin];
+    const plWaterNetworkJoin& join = joins[uiJoin];
+    const plWaterNetworkJoinResult& result = meshes[uiFirstLod].m_Joins[uiJoin];
+    plWaterJunctionRenderSnapshot& render = m_Junctions[source.m_uiJunction].m_RenderData;
+    const plWaterBodySnapshot& receiver = m_Bodies[source.m_uiReceiverBody].m_Data;
+
+    render.m_PrimaryBody = m_Bodies[source.m_uiRiverBody].m_Data.m_BodyId;
+    render.m_SecondaryBody = receiver.m_BodyId;
+    render.m_SecondaryType = receiver.m_Descriptor.m_Type;
+    render.m_bRiverEnd = join.m_bRiverEnd;
+    render.m_bValid = result.m_bValid && m_Bodies[source.m_uiRiverBody].m_Data.m_bGeometryValid && receiver.m_bGeometryValid;
+    render.m_sProblem = result.m_sProblem;
+    if (!result.m_bValid)
+    {
+      plLog::Warning("Water junction between bodies {} and {} was left out: {}", source.m_uiRiverBody, source.m_uiReceiverBody, result.m_sProblem);
+      continue;
+    }
+
+    render.m_vMouthLeft = result.m_vMouthLeft;
+    render.m_vMouthRight = result.m_vMouthRight;
+    render.m_vInward = result.m_vInward;
+    render.m_fMixLengthRiver = join.m_fMixLengthRiver;
+    render.m_fMixLengthReceiver = join.m_fMixLengthReceiver;
+    render.m_fMouthWeight = join.m_fMouthWeight;
+    for (plUInt32 uiLod = uiFirstLod; uiLod < uiLodCount; ++uiLod)
+    {
+      const plWaterNetworkJoinResult& lodResult = meshes[uiLod].m_Joins[uiJoin];
+      render.m_uiSharedVertexCount[uiLod] = lodResult.m_bValid ? lodResult.m_uiSharedVertexCount : 0;
+      if (lodResult.m_bValid)
+        render.m_fMaximumSeamError = plMath::Max(render.m_fMaximumSeamError, lodResult.m_fMaximumSeamError);
+    }
+    render.m_vCutoutCenter = result.m_vCutoutCenter;
+    render.m_vCutoutDirection = result.m_vCutoutDirection;
+    render.m_fCutoutHalfLength = result.m_fCutoutHalfLength;
+    render.m_fStartHalfWidth = result.m_fCutoutStartHalfWidth;
+    render.m_fEndHalfWidth = result.m_fCutoutEndHalfWidth;
+    render.m_fCutoutHoldFraction = result.m_fCutoutHoldFraction;
+
+    // The current that queries see in the receiver: a plume from the middle of the mouth line.
+    const float fHalfWidth = (result.m_vMouthLeft - result.m_vMouthRight).GetLength() * 0.5f;
+    render.m_vFlowFieldOrigin = ((result.m_vMouthLeft + result.m_vMouthRight) * 0.5f).GetAsVec2();
+    render.m_vFlowFieldDirection = result.m_vInward;
+    render.m_fFlowFieldLength = plMath::Clamp(plMath::Max(join.m_fMixLengthReceiver * 1.5f, fHalfWidth * 4.0f), 3.0f, 24.0f);
+    render.m_fFlowFieldHalfWidth = plMath::Clamp(fHalfWidth * 1.35f, 0.75f, 12.0f);
+    render.m_fFlowFieldSpeed = source.m_fRiverPush;
+    render.m_fFlowFieldDirectionSign = source.m_fDirectionSign;
+  }
+}
+
 
 bool plWaterWorldModule::TrySampleSurface(const plWaterSurfaceQuery& query, plWaterSurfaceResult& out_result) const
 {

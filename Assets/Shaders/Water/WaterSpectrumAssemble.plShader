@@ -1,0 +1,70 @@
+[PLATFORMS]
+DESKTOP
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Water/WaterSimulationConstants.h>
+
+// The transformed wave field as the surface shaders read it.
+//   Displacement: xyz = where a point of the still surface is moved to (xy scaled by the profile's steepness),
+//                 w = foam: how far the surface is folded over itself there, and what is left of the foam that
+//                 earlier folds made. A wave breaks for a moment; its foam stays behind and fades over seconds.
+//   Slope:        xy = height gradient, z = its squared length (for the roughness of what a mip averages away),
+//                 w = the Jacobian of the horizontal displacement (below 1: compressed, below 0: folded).
+
+StructuredBuffer<plWaterGpuSpectrumProfile> WaterSpectrumProfiles;
+Texture2DArray<float4> WaterFftInputA;
+Texture2DArray<float4> WaterFftInputB;
+RWTexture2DArray<float4> WaterSpectrumDisplacementOutput;
+RWTexture2DArray<float4> WaterSpectrumSlopeOutput;
+// The foam of the frame before, in the same tile space. Read and written here; nothing else touches it.
+RWTexture2DArray<float> WaterSpectrumFoamHistory;
+
+[numthreads(WATER_SIMULATION_THREAD_GROUP_SIZE, WATER_SIMULATION_THREAD_GROUP_SIZE, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  if (dispatchThreadId.x >= WaterSimulationSize.x || dispatchThreadId.y >= WaterSimulationSize.y || dispatchThreadId.z >= WaterSimulationSize.z)
+    return;
+
+  const uint cascadeSlots = max(WaterSimulationSize.z / WATER_MAX_SPECTRUM_PROFILES, 1u);
+  const uint profileIndex = min(dispatchThreadId.z / cascadeSlots, WATER_MAX_SPECTRUM_PROFILES - 1u);
+  const plWaterGpuSpectrumProfile profile = WaterSpectrumProfiles[profileIndex];
+  if (profile.ProfileParams.w == 0u || (dispatchThreadId.z % cascadeSlots) >= min(profile.ProfileParams.z, cascadeSlots))
+  {
+    WaterSpectrumDisplacementOutput[dispatchThreadId] = 0.0;
+    WaterSpectrumSlopeOutput[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+    WaterSpectrumFoamHistory[dispatchThreadId] = 0.0;
+    return;
+  }
+
+  // Each complex number holds two real fields (see WaterSpectrumUpdate).
+  const float4 a = WaterFftInputA.Load(int4(dispatchThreadId, 0));
+  const float4 b = WaterFftInputB.Load(int4(dispatchThreadId, 0));
+  const float height = a.x;
+  const float2 displacement = float2(a.y, a.z);
+  const float2 slope = float2(a.w, b.x);
+  const float displacementXX = b.y;
+  const float displacementYY = b.z;
+  const float displacementXY = b.w;
+
+  // Steepness is how far the water is pushed towards the crests. At one the sharpest crests just begin to fold.
+  const float choppiness = saturate(profile.WaveParams.y) * 1.6;
+  const float jacobian = (1.0 + choppiness * displacementXX) * (1.0 + choppiness * displacementYY) - choppiness * choppiness * displacementXY * displacementXY;
+  // The Jacobian is one on still water and falls where the surface is squeezed together, towards a crest. Foam
+  // starts where it falls below the profile's Foam Crest Threshold.
+  const float foamThreshold = clamp(profile.WaveParams.z, 0.2, 0.98);
+  const float fold = saturate((foamThreshold - jacobian) * 3.0);
+
+  // Foam is made where the surface folds, and then it is simply there: it does not vanish when the crest that made it
+  // has passed. What was here a frame ago has faded by the time that went by (to a third in five seconds); the fold
+  // of this frame tops it up. WaterSimulationTime.z is set when there is no frame before to build on.
+  const float previousFoam = WaterSimulationTime.z > 0.5 ? 0.0 : WaterSpectrumFoamHistory[dispatchThreadId];
+  const float foam = max(saturate(previousFoam) * exp(-WaterSimulationTime.y / 4.5), fold);
+  WaterSpectrumFoamHistory[dispatchThreadId] = foam;
+
+  WaterSpectrumDisplacementOutput[dispatchThreadId] = float4(displacement * choppiness, height, foam);
+  WaterSpectrumSlopeOutput[dispatchThreadId] = float4(slope, dot(slope, slope), jacobian);
+}

@@ -1,0 +1,87 @@
+[PLATFORMS]
+DESKTOP
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Water/WaterSpectrumFftConstants.h>
+
+// One pass of the inverse transform of the wave field: every row of every layer, or every column. A thread group is
+// one line; its threads share the line in group memory and work through the stages of the transform in place, so a
+// whole line is done in a single dispatch instead of one dispatch per stage.
+
+Texture2DArray<float4> WaterFftInputA;
+Texture2DArray<float4> WaterFftInputB;
+RWTexture2DArray<float4> WaterFftOutputA;
+RWTexture2DArray<float4> WaterFftOutputB;
+
+#define WATER_FFT_MAX_SIZE 256
+
+groupshared float4 s_LineA[WATER_FFT_MAX_SIZE];
+groupshared float4 s_LineB[WATER_FFT_MAX_SIZE];
+
+// Both complex numbers of a texel times one complex factor.
+float4 ComplexMultiply2(float4 value, float2 factor)
+{
+  return float4(value.x * factor.x - value.y * factor.y, value.x * factor.y + value.y * factor.x,
+    value.z * factor.x - value.w * factor.y, value.z * factor.y + value.w * factor.x);
+}
+
+[numthreads(WATER_FFT_MAX_SIZE, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  const uint4 params = GET_PUSH_CONSTANT(plWaterSpectrumFftConstants, FftParams);
+  const uint size = params.x;
+  const uint stages = params.y;
+  const bool columns = params.z != 0u;
+  const uint index = groupThreadId.x;
+  const uint lineIndex = groupId.y;
+  const uint layer = groupId.z;
+  const bool active = index < size;
+
+  // The transform works on the line in bit-reversed order.
+  if (active)
+  {
+    const uint source = reversebits(index) >> (32u - stages);
+    const int4 texel = columns ? int4(lineIndex, source, layer, 0) : int4(source, lineIndex, layer, 0);
+    s_LineA[index] = WaterFftInputA.Load(texel);
+    s_LineB[index] = WaterFftInputB.Load(texel);
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  [unroll]
+  for (uint stage = 0u; stage < 8u; ++stage)
+  {
+    // A stage pairs each element with the one half a block further on. The thread of the first element of a pair
+    // computes both, so no element is written by two threads.
+    const uint half = 1u << stage;
+    const uint block = half << 1u;
+    if (stage < stages && active && (index & half) == 0u)
+    {
+      const uint position = index & (block - 1u);
+      float s;
+      float c;
+      // Inverse transform: e^(+2 pi i j / block).
+      sincos(6.2831853 * float(position) / float(block), s, c);
+      const float2 twiddle = float2(c, s);
+      const float4 evenA = s_LineA[index];
+      const float4 evenB = s_LineB[index];
+      const float4 oddA = ComplexMultiply2(s_LineA[index + half], twiddle);
+      const float4 oddB = ComplexMultiply2(s_LineB[index + half], twiddle);
+      s_LineA[index] = evenA + oddA;
+      s_LineB[index] = evenB + oddB;
+      s_LineA[index + half] = evenA - oddA;
+      s_LineB[index + half] = evenB - oddB;
+    }
+    GroupMemoryBarrierWithGroupSync();
+  }
+
+  if (active)
+  {
+    const uint3 texel = columns ? uint3(lineIndex, index, layer) : uint3(index, lineIndex, layer);
+    WaterFftOutputA[texel] = s_LineA[index];
+    WaterFftOutputB[texel] = s_LineB[index];
+  }
+}

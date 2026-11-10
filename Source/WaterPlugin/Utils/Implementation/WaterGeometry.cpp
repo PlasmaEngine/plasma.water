@@ -362,6 +362,15 @@ plResult plWaterGeometry::TriangulateLake(plArrayPtr<const plVec3> boundary,
     }
   }
 
+  return TriangulateLakePolygon(cleaned, out_vertices, out_indices, fEpsilon, settings);
+}
+
+plResult plWaterGeometry::TriangulateLakePolygon(plArrayPtr<const plVec3> cleaned, plDynamicArray<plWaterGeometryVertex>& out_vertices,
+  plDynamicArray<plUInt32>& out_indices, float fEpsilon, const plWaterFiniteMeshSettings& settings)
+{
+  out_vertices.Clear();
+  out_indices.Clear();
+
   if (cleaned.GetCount() < 3)
     return PL_FAILURE;
 
@@ -593,6 +602,27 @@ void plWaterGeometry::BuildOceanClipmap(plUInt8 uiRingCount, plUInt16 uiPatchRes
       }
     }
   }
+}
+
+plUInt32 plWaterGeometry::GetOceanRingCells(plUInt32 uiPatchResolution, plUInt32 uiQualityCells, plUInt32 uiRing, plUInt32 uiMultiplier)
+{
+  plUInt32 uiBase = plMath::Clamp<plUInt32>(plMath::Min(uiPatchResolution, uiQualityCells), 2u, 64u);
+  uiBase = plMath::PowerOfTwo_Floor(uiBase);
+  const plUInt32 uiCells = plMath::Max<plUInt32>(uiBase >> plMath::Min<plUInt32>(uiRing, 6u), 2u);
+  return plMath::Min<plUInt32>(uiCells * plMath::PowerOfTwo_Floor(plMath::Max<plUInt32>(uiMultiplier, 1u)), 256u);
+}
+
+plUInt32 plWaterGeometry::GetOceanSeamRatio(plUInt32 uiRingCells, plUInt32 uiOuterRingCells)
+{
+  // The outer ring's patch is twice as long, so one of its cells spans 2 * cells / outer cells of this ring's.
+  return plMath::Max<plUInt32>((uiRingCells * 2u) / plMath::Max<plUInt32>(uiOuterRingCells, 1u), 1u);
+}
+
+plUInt32 plWaterGeometry::SnapOceanSeamIndex(plUInt32 uiIndex, plUInt32 uiSeamRatio)
+{
+  if (uiSeamRatio <= 1)
+    return uiIndex;
+  return ((uiIndex + uiSeamRatio / 2u) / uiSeamRatio) * uiSeamRatio;
 }
 
 bool plWaterGeometry::IsPointInPolygonXY(plArrayPtr<const plVec3> polygon, const plVec2& point, float fEpsilon)

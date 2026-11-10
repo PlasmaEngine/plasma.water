@@ -26,8 +26,15 @@ struct PL_WATER_DLL plWaterGeometryVertex
   float m_fDepth = 0.0f;
   /// Scales displacement at this vertex. Zero pins authored shorelines and volume bottoms.
   float m_fWaveAttenuation = 1.0f;
-  /// Zero for ordinary body meshes; 0..1 across a generated junction patch.
+  /// Weight of the second profile of the pair: zero for ordinary body meshes, 0..1 across a transition.
   float m_fProfileBlend = 0.0f;
+  /// The pair of profiles this vertex blends, as indices into the profile table (the index of a body in
+  /// plWaterWorldModule). 255 means the profile of the draw that renders the mesh. All vertices of one triangle
+  /// hold the same pair.
+  plUInt8 m_uiProfileA = 255;
+  plUInt8 m_uiProfileB = 255;
+  /// How ragged the front between the two profiles is drawn, 0..1. The junction's Front Breakup.
+  float m_fFrontBreakup = 0.0f;
 };
 
 struct PL_WATER_DLL plWaterFiniteMeshSettings
@@ -89,9 +96,30 @@ public:
     plDynamicArray<plUInt32>& out_indices, float fEpsilon = 0.001f,
     const plWaterFiniteMeshSettings& settings = plWaterFiniteMeshSettings());
 
+  /// The triangulation step of TriangulateLake on its own: takes the outline as given, without removing collinear or
+  /// duplicate points first. So a point placed on a straight shore (the end of a river mouth, for one) stays a vertex,
+  /// and out_vertices[i] is boundary[i] for every point of the outline. The outline has to be a simple polygon.
+  /// Edges longer than the target length are split at their midpoint, on the outline as well as inside.
+  static plResult TriangulateLakePolygon(plArrayPtr<const plVec3> boundary, plDynamicArray<plWaterGeometryVertex>& out_vertices,
+    plDynamicArray<plUInt32>& out_indices, float fEpsilon = 0.001f,
+    const plWaterFiniteMeshSettings& settings = plWaterFiniteMeshSettings());
+
   /// Generates central patches and nested rings. Seam masks identify edges that meet another LOD.
   static void BuildOceanClipmap(plUInt8 uiRingCount, plUInt16 uiPatchResolution, float fBasePatchSize,
     plDynamicArray<plWaterOceanClipmapPatch>& out_patches);
+
+  /// Cells along one side of an ocean patch of a ring. A power of two that halves from ring to ring (while a patch
+  /// doubles in size) and never falls below two; uiMultiplier refines a ring as a whole. Because every count is an even
+  /// power of two, the vertices of a ring's outer edge include every vertex the next ring has there.
+  static plUInt32 GetOceanRingCells(plUInt32 uiPatchResolution, plUInt32 uiQualityCells, plUInt32 uiRing, plUInt32 uiMultiplier = 1);
+
+  /// How many cells of a ring lie along one cell of the ring outside it, at the edge where the two meet.
+  static plUInt32 GetOceanSeamRatio(plUInt32 uiRingCells, plUInt32 uiOuterRingCells);
+
+  /// Moves a vertex of a ring's outer edge, given by its index along the edge, onto the nearest vertex of the ring
+  /// outside it. The vertex shader does the same (WaterSurfaceModern.plShader), which closes the ring seam: on that edge
+  /// the fine ring then has no vertex the coarse ring lacks.
+  static plUInt32 SnapOceanSeamIndex(plUInt32 uiIndex, plUInt32 uiSeamRatio);
 
   static bool IsPointInPolygonXY(plArrayPtr<const plVec3> polygon, const plVec2& point, float fEpsilon = 0.001f);
   static bool FindClosestPointOnRiver(plArrayPtr<const plWaterControlPoint> points, const plVec2& point, plWaterRiverLocation& out_location);
