@@ -1,0 +1,199 @@
+HeaderV2
+{
+o
+{
+	Uuid %id{u4{1657125817060391956,8864754210868727608}}
+	s %t{"plAssetDocumentInfo"}
+	u3 %v{2}
+	s %n{"Header"}
+	p
+	{
+		s %AssetType{"WaterProfile"}
+		VarArray %Dependencies{}
+		Uuid %DocumentID{u4{1657125817060391956,8864754210868727608}}
+		u4 %Hash{961907818773553360}
+		VarArray %MetaInfo{}
+		VarArray %Outputs{}
+		VarArray %PackageDeps
+		{
+			s{"{ 0753ed83-0a62-42dc-a964-c0458ba1d74e }"}
+			s{"{ 7cdd0fa2-f12a-437e-9f40-d14fc11f7ec0 }"}
+		}
+		VarArray %References
+		{
+			s{"{ 0753ed83-0a62-42dc-a964-c0458ba1d74e }"}
+			s{"{ 7cdd0fa2-f12a-437e-9f40-d14fc11f7ec0 }"}
+		}
+	}
+}
+}
+Objects
+{
+o
+{
+	Uuid %id{u4{18155111095158685113,7482987419569588884}}
+	s %t{"plWaterProfileResourceDescriptor"}
+	u3 %v{6}
+	p
+	{
+		Vec3 %Absorption{f{0x8FC2753E,0xAE47613D,0xBC74933C}}
+		f %AngularDrag{0xCDCC4C3D}
+		f %BaseWavelength{0x0000A040}
+		u1 %CpuWaveCount{8}
+		Color %DeepColor{f{0x0AD7233C,0xEC51B83D,0x0AD7233E,0x8FC2753F}}
+		f %Density{0x00007A44}
+		b %EnableLakeSpectrum{0}
+		f %EnvironmentReflectionWeight{0x3333933F}
+		f %FiniteMeshCellSize{0x0000803E}
+		f %FlowScale{0x0000803F}
+		f %FoamBreakupScale{0xEC51383E}
+		Color %FoamColor{f{0x9A99593F,0x6666663F,0x1F856B3F,0x0000803F}}
+		f %FoamCrestThreshold{0x14AE473F}
+		f %FoamInteractionStrength{0xCDCC4C3F}
+		f %FoamRoughness{0xEC51383F}
+		f %FoamShoreDepth{0x0000403F}
+		f %FoamStrength{0xCDCCCC3D}
+		s %FoamTexture{"{ 7cdd0fa2-f12a-437e-9f40-d14fc11f7ec0 }"}
+		u1 %GpuCascadeCount{2}
+		u2 %GpuCascadeResolution{256}
+		f %IndexOfRefraction{0xBE9FAA3F}
+		f %LinearDrag{0x9A99993E}
+		u2 %MaxRiverCrossSubdivisions{32}
+		f %MicroNormalScale{0x0000803F}
+		f %MicroNormalStrength{0xAE47613E}
+		s %NormalTexture{"{ 0753ed83-0a62-42dc-a964-c0458ba1d74e }"}
+		f %ReflectedCaustics{0x9A99193E}
+		f %ReflectionStrength{0x0000803F}
+		f %RefractionDepth{0x00001041}
+		f %RefractionEdgeRejection{0x6666263F}
+		f %RefractionStrength{0xA69B443C}
+		f %RippleDamping{0xF6287C3F}
+		f %RippleMaxAmplitude{0xCDCC4C3E}
+		f %RipplePropagationSpeed{0x00004040}
+		f %RiverCurvatureRefinement{0x0000803F}
+		f %Roughness{0xCDCC4C3D}
+		Vec3 %Scattering{f{0x8FC2753C,0xEC51383D,0xB81E853D}}
+		Color %ShallowColor{f{0x0AD7A33E,0xEC51383F,0xCDCC4C3F,0xE17A143F}}
+		f %ShoreFadeDepth{0x9A99993F}
+		f %ShoreWaveFadeDistance{0x0000C03F}
+		f %SmallestGpuWavelength{0x0000003F}
+		s %SpectrumMode{"plWaterWaveSpectrumMode::Analytic"}
+		f %SunGlitterStrength{0x8FC2F53E}
+		s %SurfaceMaterial{""}
+		f %UnderwaterCaustics{0x0000803E}
+		f %UnderwaterDistortion{0xEC51383E}
+		f %UnderwaterFogDensity{0x8FC2753D}
+		f %UnderwaterHaze{0x0000803E}
+		f %UnderwaterLightShafts{0x8FC2F53D}
+		f %UnderwaterMeniscus{0xCDCCCC3D}
+		f %UnderwaterScattering{0x6666263F}
+		f %WaveAmplitude{0xCDCC4C3D}
+		u3 %WaveSeed{12648430}
+		f %WaveSteepness{0x295C0F3E}
+		Vec2 %WindDirection{f{0x0000803F,0}}
+		f %WindSpeed{0x9A99993F}
+	}
+}
+o
+{
+	Uuid %id{u4{18368543440135824488,6997908004029186204}}
+	s %t{"plDocumentRoot"}
+	u3 %v{1}
+	s %n{"ObjectTree"}
+	p
+	{
+		VarArray %Children
+		{
+			Uuid{u4{18155111095158685113,7482987419569588884}}
+		}
+	}
+}
+}
+Types
+{
+o
+{
+	Uuid %id{u4{12489963337836728706,3000529116581503978}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{""}
+		s %PluginName{"plEditorPluginWater"}
+		VarArray %Properties{}
+		s %TypeName{"plWaterProfileResourceDescriptor"}
+		u3 %TypeVersion{6}
+	}
+}
+o
+{
+	Uuid %id{u4{7009381072334277535,9659459603664967231}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plReflectedClass"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plDocumentRoot"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{16819636187740221814,11089501717885464587}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{""}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plEnumBase"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{9991009975358129213,17320282571841627506}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::IsEnum|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plEnumBase"}
+		s %PluginName{"plEditorPluginWater"}
+		VarArray %Properties{}
+		s %TypeName{"plWaterWaveSpectrumMode"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{13033624727069548121,17368468367984449402}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{""}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plReflectedClass"}
+		u3 %TypeVersion{1}
+	}
+}
+}
