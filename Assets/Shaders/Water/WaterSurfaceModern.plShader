@@ -537,7 +537,7 @@ float2 ProjectWaterWorldToUV(float3 worldPosition, out float projectionValid)
 // tiered bisection samples refine it. Conservative validity weights make the existing probe/sky
 // lighting take over at silhouettes, off-screen rays, rough water, and numerically unstable grazing angles.
 float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDirection, float surfaceLinearDepth,
-  float perceptualRoughness, float noV, uint eyeIndex, out float reflectionValidity)
+  float perceptualRoughness, float noV, uint eyeIndex, float jitter, out float reflectionValidity)
 {
   reflectionValidity = 0.0;
   const float3 cameraForward = normalize(GetCameraDirForwards());
@@ -549,17 +549,20 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
   // The visible water surface is already in front of the opaque depth at the ray origin. Treat the
   // self-intersection offset as the initial front sample so nearby reflectors remain bracketed.
   bool hasFrontSample = true;
-  const uint stepCount = clamp((uint)WaterQualityParams.x, 1u, 6u);
+  const uint stepCount = clamp((uint)WaterQualityParams.x, 1u, 8u);
 
   [unroll]
-  for (uint stepIndex = 0u; stepIndex < 6u; ++stepIndex)
+  for (uint stepIndex = 0u; stepIndex < 8u; ++stepIndex)
   {
     if (stepIndex >= stepCount)
       break;
 
     // Reserve the first tap for near-field reflections, then spread the remaining taps cubically to
     // retain the authored far range with High's four-step budget.
-    const float normalizedStep = stepCount > 1u ? float(stepIndex) / float(stepCount - 1u) : 1.0;
+    // Each pixel starts its steps at a different point between two of them. A handful of fixed steps shows as bands
+    // where every pixel misses the same thin reflector; jittered, the bands become noise that the temporal filter
+    // averages into the reflection.
+    const float normalizedStep = saturate((float(stepIndex) + jitter) / float(stepCount));
     const float traceDistance = 0.08 + maxTraceDistance * normalizedStep * normalizedStep * normalizedStep;
     float projectionValid;
     const float3 projected = ProjectWaterWorldToScreen(worldPosition + reflectionDirection * traceDistance, projectionValid);
@@ -581,7 +584,7 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
       float hitDelta = depthDelta;
 
       // Refine only confirmed crossings. High uses two bisections for its 1440p budget; Ultra uses four.
-      const uint refinementCount = stepCount >= 6u ? 4u : 2u;
+      const uint refinementCount = stepCount >= 8u ? 4u : 2u;
       [unroll]
       for (uint refinement = 0u; refinement < 4u; ++refinement)
       {
@@ -850,10 +853,10 @@ float4 main(PS_IN input) : SV_Target0
   const float3 surfaceNormal = ApplyWaterNormalDetail(
     waveNormal, input.WorldPosition, profileA, profileB, materialProfileBlend, primaryFlowVelocity, secondaryFlowVelocity);
   const float3 viewDirection = normalize(GetCameraPosition() - input.WorldPosition);
-  // Thickness is intentionally the full distance to the visible opaque surface. Where no floor geometry
-  // exists the transmittance collapses to zero and the extinction lerp below produces the authored deep
-  // color - the same mechanism that gives the open ocean its color. Clamping this to the authored body
-  // depth makes the water transparent against the void behind it, which renders as black.
+  // The distance from the surface to whatever is behind it, measured along the camera's axis. This is what the depth
+  // buffer gives, and it is only used to get at the two measures that mean something to water: how deep the water is
+  // under the pixel (verticalDepth) and how far the light travels through it (waterPathLength). Where there is no
+  // bed at all, both are very large and the water takes its deep colour.
   const float thickness = max(opaqueLinearDepth - surfaceLinearDepth, 0.0);
   const float4 absorptionAndRoughness = lerp(profileA.AbsorptionAndRoughness, profileB.AbsorptionAndRoughness, materialProfileBlend);
   const float4 scatteringAndIor = lerp(profileA.ScatteringAndIor, profileB.ScatteringAndIor, materialProfileBlend);
@@ -875,7 +878,11 @@ float4 main(PS_IN input) : SV_Target0
   // pixel was shaded as seen from below. The surface is a height field, so the face normal that points up is its top.
   float3 faceNormal = cross(ddx(input.WorldPosition), ddy(input.WorldPosition));
   faceNormal = faceNormal.z >= 0.0 ? faceNormal : -faceNormal;
-  const bool cameraOnNormalSide = dot(faceNormal, viewDirection) >= 0.0;
+  // And only an underwater camera can see the surface from below at all. For a camera in the air the answer is known
+  // without looking at the triangle, which matters where a triangle is seen nearly edge on (the far sea at eye level)
+  // and its face normal is a matter of rounding: such pixels showed the bare sea bed.
+  const bool cameraIsUnderwater = GET_PUSH_CONSTANT(plWaterDrawConstants, VolumeFilterParams).w != 0u;
+  const bool cameraOnNormalSide = !cameraIsUnderwater || dot(faceNormal, viewDirection) >= 0.0;
   const float3 normal = cameraOnNormalSide ? surfaceNormal : -surfaceNormal;
   const float noV = saturate(dot(normal, viewDirection));
   const float ior = max(scatteringAndIor.w, 1.0);
@@ -886,8 +893,16 @@ float4 main(PS_IN input) : SV_Target0
   const float3 incidentDirection = -viewDirection;
   const float3 refractionDirection = EvaluateWaterRefractionDirection(incidentDirection, normal, incidentIor, transmittedIor, noV, cosTransmitted);
 
+  // How deep the water is under this pixel: the drop from the surface to the point of the bed that lies straight
+  // behind it. Over a level bed that is the water's depth from every direction, which the distance along the view ray
+  // is not: measured that way, a shore band was wide from above and thin from the side.
+  const float3 cameraForward = normalize(GetCameraDirForwards());
+  const float incidentForward = max(dot(incidentDirection, cameraForward), 0.05);
+  const float directPathLength = thickness / incidentForward;
+  const float verticalDepth = cameraOnNormalSide ? max(-incidentDirection.z * directPathLength, 0.0) : 0.0;
+
   const float refractionStrength = clamp(foamParams.w, 0.0, 0.03);
-  const float refractionDepthFade = 1.0 - exp(-thickness / max(opticalParams.z, 0.01));
+  const float refractionDepthFade = 1.0 - exp(-verticalDepth / max(opticalParams.z * 0.25, 0.01));
   const float refractionGrazingFade = smoothstep(0.03, 0.2, noV);
   const float edgeDistance = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
   const float refractionEdgeFade = smoothstep(0.0, lerp(0.002, 0.08, saturate(surfaceDetailParams.w)), edgeDistance);
@@ -895,7 +910,6 @@ float4 main(PS_IN input) : SV_Target0
   // Trace the refracted WORLD-SPACE ray to approximately the opaque receiver's view depth, then project it
   // back to screen space. Unlike normal.xy UV offsets this remains correct as the camera rotates and responds
   // to the profile IOR. RefractionDepth caps the trace where extinction has already hidden deeper detail.
-  const float3 cameraForward = normalize(GetCameraDirForwards());
   const float refractedForward = dot(refractionDirection, cameraForward);
   const float traceForwardDepth = min(thickness, max(opticalParams.z * 2.0, 0.25));
   const float traceDistance = traceForwardDepth / max(refractedForward, 0.05);
@@ -917,21 +931,24 @@ float4 main(PS_IN input) : SV_Target0
   const float sceneColorToAbsolute = SceneColorToAbsolute();
   const float3 undistortedSceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(uv, eyeIndex), 0).rgb * sceneColorToAbsolute;
   const float3 sceneColor = WaterSceneColor.SampleLevel(LinearClampSampler, float3(refractionUV, eyeIndex), 0).rgb * sceneColorToAbsolute;
-  const float incidentForward = max(dot(incidentDirection, cameraForward), 0.05);
-  const float directPathLength = thickness / incidentForward;
+  // The same two measures for the bed that the refracted ray shows, where there is one on screen.
   const float refractedPathLength = max(candidateOpaqueDepth - surfaceLinearDepth, 0.0) / max(refractedForward, 0.05);
-  // From below, the transmitted ray leaves the water immediately; the underwater composite already applies
-  // extinction between the camera and this interface. Applying the below-surface distance again here would
-  // double-absorb the view of the world above the waterline.
-  const float waterPathLength = cameraOnNormalSide ? lerp(directPathLength, refractedPathLength, refractionValid) : 0.0;
+  const float refractedVerticalDepth = max(-refractionDirection.z * refractedPathLength, 0.0);
+  const float waterDepth = cameraOnNormalSide ? lerp(verticalDepth, refractedVerticalDepth, refractionValid) : 0.0;
+  // Light from the bed comes up through the water along the refracted ray, which is never far from vertical (48
+  // degrees at most): its path is the depth over the ray's vertical share. From below, the transmitted ray leaves the
+  // water at once, and the underwater composite has already applied what lies between the camera and the surface.
+  const float waterPathLength = waterDepth / max(abs(refractionDirection.z), 0.5);
+
+  // One optical model. The profile gives an extinction per metre for each colour and the colour of deep water; what
+  // is seen through the surface is the bed, dimmed by the water above it, plus the water's own colour for as much of
+  // the path as is water. Extinction is fitted to Shallow Color: white sand under Refraction Depth metres of water
+  // looks like it. See plWaterFillGpuProfile.
   const float3 transmittance = exp(-max(absorptionAndRoughness.xyz, 0.0) * waterPathLength);
-  const float tintDepth = saturate(1.0 - exp(-waterPathLength / max(opticalParams.z, 0.01)));
-  const float3 authoredTint = lerp(shallowColor.rgb, deepColor.rgb, tintDepth);
-  const float tintCoverage = saturate(lerp(shallowColor.a, deepColor.a, tintDepth));
   const float3 refractedSceneColor = sceneColor * transmittance;
 
   const float f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
-  const float shoreFoam = pow(1.0 - saturate(thickness / max(foamParams.z, 0.01)), 3.0);
+  const float shoreFoam = pow(1.0 - saturate(verticalDepth / max(foamParams.z, 0.01)), 3.0);
   const float crestFoam = saturate((foamParams.y - surfaceNormal.z) / max(foamParams.y * 0.35, 0.02));
   const float spectralFoam = saturate(max(input.SpectrumFoam, spectrumDetail.Fold * pixelWaveAttenuation));
   // River mouth churn: where the outflowing current and the incoming waves contest each other the water
@@ -973,45 +990,71 @@ float4 main(PS_IN input) : SV_Target0
   materialData.occlusion = 1.0;
   materialData.opacity = 1.0;
   const plPerClusterData clusterData = GetClusterData(input.Position.xyw);
-  // A directional light is a delta source in the clustered renderer. At water's very low authored roughness,
-  // evaluating that source without a finite angular / pixel footprint creates tens or hundreds of HDR units in
-  // one lobe and bloom turns it into a large glowing patch. Apply specular AA only to direct lights; reflections
-  // retain the authored roughness and therefore keep their crisp detail.
-  const float directPerceptualRoughness = max(perceptualRoughness, 0.20);
+  // Direct light uses the surface's own roughness, which by now holds the slopes of every wave smaller than the pixel:
+  // that is what gives the sun's reflection its width, wide and soft far away and a narrow sparkle up close. (A fixed
+  // floor of 0.2 stood in for it before, and turned every glint into a glowing patch.) The floor that is left only
+  // keeps a mirror-flat surface from collapsing the sun into a single pixel of unbounded radiance.
+  const float directPerceptualRoughness = max(perceptualRoughness, 0.06);
   plMaterialData directMaterialData = materialData;
   directMaterialData.perceptualRoughness = directPerceptualRoughness;
   directMaterialData.roughness = directPerceptualRoughness * directPerceptualRoughness;
   const AccumulatedLight engineLighting = CalculateLightingDirectOnly(directMaterialData, clusterData, input.Position.xyw, false);
 
-  // The authored profile colors are albedo-like values, not radiance - adding them raw makes water pitch
-  // black next to sun-lit geometry in an HDR scene. The clustered lighting result cannot provide the
-  // irradiance either: screen-space and virtual shadow maps derive from the opaque depth buffer and report
-  // water as fully shadowed. Light the tint analytically instead: dominant directional light (unshadowed)
-  // plus sky irradiance.
+  // The sun on water: its light, and whether it gets here. The engine's shadow map is looked up at the surface's own
+  // position, so a cliff, a bridge or a cloud shades the water under it.
   const float3 mainLightVector = MainLightDirection.xyz;
   const float mainLightLengthSquared = dot(mainLightVector, mainLightVector);
   const float mainLightSignal = dot(max(MainLightColorIntensity.rgb, 0.0), float3(0.2126, 0.7152, 0.0722));
   const float mainLightValid = step(1.0e-6, mainLightLengthSquared) * step(1.0e-6, mainLightSignal);
   const float3 mainLightDirection = mainLightVector * rsqrt(max(mainLightLengthSquared, 1.0e-6));
-  const float noL = saturate(dot(normal, mainLightDirection)) * mainLightValid;
-  const float3 sunIrradiance = MainLightColorIntensity.rgb * noL * INV_PI;
+  float3 sunShadowCoverage;
+  const float sunShadow = mainLightValid > 0.0 ? EvaluateWaterSunShadow(input.WorldPosition, float3(0.0, 0.0, 1.0), input.Position.xyw, sunShadowCoverage) : 1.0;
+  const float3 sunRadiance = MainLightColorIntensity.rgb * (mainLightValid * sunShadow);
+
+  // What lights the surface (foam), and what lights the water below it. The water's own colour is light scattered
+  // back out of its depth, which does not follow every ripple: it takes the light that falls on the level surface.
+  const float noL = saturate(dot(normal, mainLightDirection));
   const float3 ambientIrradiance = EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, normal).rgb;
-  const float3 diffuseIrradiance = sunIrradiance + ambientIrradiance;
-  const float lightingSignal = dot(diffuseIrradiance, float3(0.2126, 0.7152, 0.0722));
+  const float3 diffuseIrradiance = sunRadiance * noL * INV_PI + ambientIrradiance;
+  const float3 levelNormal = cameraOnNormalSide ? float3(0.0, 0.0, 1.0) : float3(0.0, 0.0, -1.0);
+  const float3 volumeIrradiance = sunRadiance * saturate(mainLightDirection.z) * INV_PI + EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, levelNormal).rgb;
+  const float lightingSignal = dot(volumeIrradiance, float3(0.2126, 0.7152, 0.0722));
   const float missingLighting = 1.0 - smoothstep(0.002, 0.04, lightingSignal);
   // Some valid scenes intentionally have no sun, sky light, or reflection probe. Preserve a restrained amount of
   // radiance from the pre-water scene and a small neutral floor so deep water remains legible instead of becoming
   // mathematically black. The fallback fades away as soon as real irradiance is available.
-  const float3 lowEnergySceneFallback = max(undistortedSceneColor * 0.06, float3(0.006, 0.008, 0.01)) + authoredTint * 0.035;
-  const float3 litTint = authoredTint * diffuseIrradiance + lowEnergySceneFallback * missingLighting;
-  const float3 litInScattering = max(scatteringAndIor.xyz, 0.0) * (1.0 - transmittance) * diffuseIrradiance;
-  // The depth ramp brings ShallowColor in over the first RefractionDepth meters while the very edge of a
-  // shore stays transparent; physical extinction alone leaves all shallow water colorless.
-  const float3 transmittedColor = lerp(refractedSceneColor + litInScattering, litTint, tintDepth * 0.8 * tintCoverage);
+  const float3 lowEnergySceneFallback = max(undistortedSceneColor * 0.06, float3(0.006, 0.008, 0.01)) + deepColor.rgb * 0.035;
+  const float3 volumeColor = deepColor.rgb * volumeIrradiance + lowEnergySceneFallback * missingLighting;
+
+  // Light that enters the back of a wave and comes out of its face: the green glow of a crest seen against the sun.
+  // It needs the sun behind the wave and a view through the wave's thin top, which the surface normal bends towards.
+  const float3 crestLightDirection = normalize(mainLightDirection + normal * 0.35);
+  const float crestThrough = pow(saturate(dot(viewDirection, -crestLightDirection)), 4.0);
+  const float crestThin = saturate(1.0 - vertexNormal.z) * 4.0 + saturate(spectrumDetail.Fold);
+  const float3 crestScattering = lerp(deepColor.rgb, shallowColor.rgb, 0.6) * sunRadiance * INV_PI * (crestThrough * saturate(crestThin) * (cameraOnNormalSide ? 1.0 : 0.0));
+
+  const float3 transmittedColor = refractedSceneColor + volumeColor * (1.0 - transmittance) + crestScattering;
+  // For the debug views: the water's own colour before light, and with it.
+  const float3 authoredTint = lerp(shallowColor.rgb, deepColor.rgb, saturate(1.0 - dot(transmittance, float3(0.333, 0.333, 0.334))));
+  const float3 litTint = volumeColor * (1.0 - transmittance);
 
   const float3 environmentBrdf = EnvironmentBRDF(materialData.specularColor, materialData.roughness, noV);
   // Water selects one indirect reflection source explicitly; clustered lighting above is direct-only.
-  const float3 probeRadiance = ComputeReflection(materialData, viewDirection, clusterData, input.Position.xyw);
+  // The probe is asked for the sky a rough sea shows, not for its mirror image. A wave field reflects the sky from
+  // well above the horizon on average: slopes that would show the horizon itself are hidden behind the waves in front
+  // of them. And a probe's horizon is the worst of it, a blur of sky with whatever lies below, which in a sky-light
+  // probe is the bare ground without any water on it. So the direction is lifted, more the rougher the surface is.
+  plMaterialData reflectionMaterialData = materialData;
+  if (cameraOnNormalSide)
+  {
+    float3 r = reflect(-viewDirection, normal);
+    if (r.z < 0.0)
+      r.z = -r.z * 0.5;
+    r.z = max(r.z, 0.2 + perceptualRoughness * 0.6);
+    r = normalize(r);
+    reflectionMaterialData.worldNormal = normalize(r + viewDirection);
+  }
+  const float3 probeRadiance = ComputeReflection(reflectionMaterialData, viewDirection, clusterData, input.Position.xyw);
   const float3 giSpecularRadiance = SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * GISpecularStrength;
   const float giSpecularValid = (GIForwardEnabled != 0 && GIForwardReflectionsEnabled != 0) ? 1.0 : 0.0;
   const float3 stableEnvironmentRadiance = lerp(probeRadiance, giSpecularRadiance, giSpecularValid);
@@ -1019,32 +1062,32 @@ float4 main(PS_IN input) : SV_Target0
   // more reflected radiance than arrives at the interface.
   const float reflectionStrength = saturate(opticalParams.x);
   const float environmentReflectionWeight = reflectionStrength * saturate(opticalParams.y);
-  const float3 reflectionDirection = reflect(-viewDirection, normal);
+  float3 reflectionDirection = reflect(-viewDirection, normal);
+  // A ray that leaves a wave downwards meets water again, and what it shows in the end is sky from lower down, not
+  // the ground half of a probe. Without a second bounce, the ray is turned back up: seen from above, far water near
+  // the horizon reflected the probe's floor as a brown band.
+  if (cameraOnNormalSide && reflectionDirection.z < 0.0)
+    reflectionDirection = normalize(float3(reflectionDirection.xy, -reflectionDirection.z * 0.5 + 0.02));
   float ssrValidity = 0.0;
   float3 ssrRadiance = 0.0;
 #if WATER_USE_SSR
   [branch]
   if (environmentReflectionWeight > 1.0e-4)
     ssrRadiance = TraceWaterScreenSpaceReflection(input.WorldPosition, reflectionDirection, surfaceLinearDepth,
-      perceptualRoughness, noV, eyeIndex, ssrValidity);
+      perceptualRoughness, noV, eyeIndex, InterleavedGradientNoise(input.Position.xy), ssrValidity);
 #endif
   // A valid water-aware SSR hit replaces the stable probe / GI source before BRDF weighting. Reflection
   // sources are selected, never accumulated, so a bright sky cannot be counted by multiple systems.
   const float3 resolvedEnvironmentRadiance = lerp(stableEnvironmentRadiance, ssrRadiance, ssrValidity);
   const float3 resolvedEnvironmentReflection = resolvedEnvironmentRadiance * environmentBrdf;
-  // Clustered specular can be fully shadowed because water is absent from the opaque depth buffer. Keep ordinary
-  // local-light specular, but evaluate the authored dominant-sun glitter explicitly so SunGlitterStrength remains
-  // responsive. Use the same energy-conserving GGX BRDF as the rest of the renderer rather than a separately
-  // normalized Phong lobe. The direct-light roughness floor approximates the finite solar disk plus the pixel
-  // footprint, preventing a calm surface from collapsing the sun into an unstable HDR impulse.
-  const float glitterStrength = 1.0 - exp(-max(surfaceDetailParams.z, 0.0));
+  // The sun's reflection. The engine's lights give it too, with contact shadows that were traced for the bed and not
+  // for the surface, so the sun is evaluated here with its own shadow and the larger of the two is taken: both are the
+  // same lobe, and the engine's stays in charge of every other light. Sun Glitter Strength is an artist's dimmer:
+  // 0.5 and above is the sun as it is.
+  const float glitterStrength = saturate(surfaceDetailParams.z * 2.0);
   const AccumulatedLight glitterBrdf = DefaultShading(directMaterialData, mainLightDirection, viewDirection);
-  const float3 analyticSunGlitter = MainLightColorIntensity.rgb * glitterBrdf.specularLight * INV_PI *
-    reflectionStrength * mainLightValid;
-  // Clustered lighting remains authoritative when its dominant-light lobe is valid. The analytic lobe only
-  // replaces a missing / weaker result over transparent water; taking the maximum avoids adding the same sun
-  // twice while retaining glitter where opaque-depth shadows incorrectly suppress the water surface.
-  const float3 directReflection = max(engineLighting.specularLight * reflectionStrength, analyticSunGlitter * glitterStrength);
+  const float3 analyticSunGlitter = sunRadiance * glitterBrdf.specularLight * INV_PI * reflectionStrength;
+  const float3 directReflection = max(engineLighting.specularLight * reflectionStrength * sunShadow, analyticSunGlitter * glitterStrength);
   float3 reflectionLighting = directReflection + resolvedEnvironmentReflection * environmentReflectionWeight;
 
   // When a world has neither a SkyLight nor a reflection probe, the engine reflection result is black.
@@ -1120,13 +1163,18 @@ float4 main(PS_IN input) : SV_Target0
   foamBrdfMaterial.perceptualRoughness = foamPerceptualRoughness;
   foamBrdfMaterial.roughness = foamPerceptualRoughness * foamPerceptualRoughness;
   const AccumulatedLight foamSunBrdf = DefaultShading(foamBrdfMaterial, mainLightDirection, viewDirection);
-  const float3 foamSunSpecular = MainLightColorIntensity.rgb * foamSunBrdf.specularLight * INV_PI * mainLightValid;
+  const float3 foamSunSpecular = sunRadiance * foamSunBrdf.specularLight * INV_PI;
   const float3 foamLighting = foamDiffuseLighting + foamSunSpecular + lowEnergySceneFallback * missingLighting;
   // Interpret the foam signal as optical density rather than a linear color weight. Thin aerated crests become
   // visible without driving established white water past full coverage, where the exponential naturally saturates.
   const float foamCoverage = 1.0 - exp(-foam * 2.5);
   color = lerp(color, foamLighting, foamCoverage * saturate(foamColor.a));
-  const float shoreVisibility = opticalParams.w > 0.0001 ? smoothstep(0.0, opticalParams.w, thickness) : 1.0;
+  // Shallow water is clear, and it is still water: its surface reflects whatever its depth. (The old shore fade
+  // blended the whole surface away over Shore Fade Depth along the view ray, so from above a metre of water over sand
+  // was not there at all.) All that is faded is the last few centimetres, where the surface meets the ground and a
+  // hard line would show the mesh.
+  const float softEdgeDepth = clamp(opticalParams.w * 0.05, 0.01, 0.15);
+  const float shoreVisibility = cameraOnNormalSide ? smoothstep(0.0, softEdgeDepth, verticalDepth) : 1.0;
   color = lerp(undistortedSceneColor, color, shoreVisibility);
 
 #if RENDER_PASS == RENDER_PASS_EDITOR

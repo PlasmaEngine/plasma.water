@@ -82,7 +82,7 @@ plWaterQualitySettings plWaterQualitySettings::Resolve(plWaterQualityTier::Enum 
       result.m_uiInteractionEventBudget = 512;
       result.m_uiInteractionEventsPerTile = 16;
       result.m_uiCausticRaySteps = 8;
-      result.m_uiScreenSpaceReflectionSteps = 6;
+      result.m_uiScreenSpaceReflectionSteps = 8;
       result.m_fCausticResolutionScale = 1.0f;
       break;
 

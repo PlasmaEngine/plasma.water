@@ -48,7 +48,7 @@ struct PL_WATER_DLL plWaterQualitySettings
   plUInt16 m_uiInteractionEventBudget = 256;
   plUInt8 m_uiInteractionEventsPerTile = 12;
   plUInt8 m_uiCausticRaySteps = 6;
-  plUInt8 m_uiScreenSpaceReflectionSteps = 4;
+  plUInt8 m_uiScreenSpaceReflectionSteps = 6;
   float m_fCausticResolutionScale = 0.5f;
   bool m_bUseSpectrum = true;
   bool m_bUseScreenSpaceReflections = true;

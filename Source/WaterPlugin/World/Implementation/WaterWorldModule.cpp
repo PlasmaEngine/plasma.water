@@ -733,7 +733,15 @@ void plWaterFillGpuProfile(plWaterGpuProfile& out_entry, const plWaterProfileRes
   const bool bOcean = type == plWaterBodyType::Ocean;
   out_entry.WindAndFlow = plVec4(vWind.x, vWind.y, bOcean ? 0.0f : fFlowSpeed, bOcean ? 0.0f : profile.m_fFlowScale);
   out_entry.SpectrumParams = plVec4(0.0f, bSpectrumAllowed ? static_cast<float>(profile.m_uiGpuCascadeCount) : 0.0f, profile.m_fRippleMaxAmplitude, bRiver ? 1.0f : 0.0f);
-  out_entry.AbsorptionAndRoughness = plVec4(profile.m_vAbsorption.x, profile.m_vAbsorption.y, profile.m_vAbsorption.z, profile.m_fRoughness);
+  // Extinction per metre, fitted to the profile's look: white sand under Refraction Depth metres of water has the
+  // Shallow Color. Deep water has the Deep Color under white light. This is the one optical model the surface
+  // shader has; the profile's Absorption and Scattering are what the underwater view uses.
+  const float fReferenceDepth = plMath::Max(profile.m_fRefractionDepth, 0.1f);
+  const plVec3 vExtinction(
+    -plMath::Ln(plMath::Clamp(profile.m_ShallowColor.r, 0.02f, 0.98f)) / fReferenceDepth,
+    -plMath::Ln(plMath::Clamp(profile.m_ShallowColor.g, 0.02f, 0.98f)) / fReferenceDepth,
+    -plMath::Ln(plMath::Clamp(profile.m_ShallowColor.b, 0.02f, 0.98f)) / fReferenceDepth);
+  out_entry.AbsorptionAndRoughness = plVec4(vExtinction.x, vExtinction.y, vExtinction.z, profile.m_fRoughness);
   out_entry.ScatteringAndIor = plVec4(profile.m_vScattering.x, profile.m_vScattering.y, profile.m_vScattering.z, profile.m_fIndexOfRefraction);
   out_entry.ShallowColor = profile.m_ShallowColor.GetAsVec4();
   out_entry.DeepColor = profile.m_DeepColor.GetAsVec4();

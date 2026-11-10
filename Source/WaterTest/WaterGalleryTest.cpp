@@ -1005,6 +1005,18 @@ plTestAppRun plGameEngineTestWaterGallery::RunMainPipelineDrawsWater()
       PL_TEST_BOOL_MSG(bInjected, "The main view's pipeline has no injected water surface pass");
     }
 
+    // What the engine did with the package's registrations over every pipeline it has built so far (the main view's,
+    // and those of the sky light's reflection probe).
+    {
+      plDynamicArray<plRenderPipelineInjectionReport> reports;
+      plRenderPipelineInjections::GetReports(reports);
+      for (const plRenderPipelineInjectionReport& report : reports)
+      {
+        plLog::Info("Injection '{}' at {}: applied to {} pipelines, stood down in {}, point not found in {}, rejected in {}, switched off in {}. {}", report.m_sName, report.m_sPoint,
+          report.m_uiApplied, report.m_uiStoodDown, report.m_uiPointNotFound, report.m_uiRejected, report.m_uiSwitchedOff, report.m_sLastProblem);
+      }
+    }
+
     m_WithWater.ResetAndCopy(m_pOwnApplication->GetLastScreenshot());
     PL_TEST_BOOL(m_pOwnApplication->SaveShot("MainPipeline_Water").Succeeded());
     SetCVarBool("Rendering.Pipeline.Injections", false);

@@ -15,7 +15,7 @@ struct PL_SHADER_STRUCT plWaterGpuProfile
   FLOAT4(WaveParams);             // x: amplitude (m), y: base wavelength (m), z: wind speed, w: steepness
   FLOAT4(WindAndFlow);            // xy: wind direction, z: flow speed, w: flow scale
   FLOAT4(SpectrumParams);         // x: spectrum slot, y: cascades in use, z: ripple ceiling (m), w: 1 where waves and detail follow the mesh's flow direction (rivers)
-  FLOAT4(AbsorptionAndRoughness); // xyz: absorption per metre, w: roughness
+  FLOAT4(AbsorptionAndRoughness); // xyz: extinction per metre (fitted so that Shallow Color is the water's tint at Refraction Depth), w: roughness
   FLOAT4(ScatteringAndIor);       // xyz: scattering per metre, w: index of refraction
   FLOAT4(ShallowColor);
   FLOAT4(DeepColor);
