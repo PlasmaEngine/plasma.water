@@ -67,6 +67,11 @@ void plWaterFrameDataExtractor::PostSortAndBatch(const plView& view, const plDyn
       if (pFrameData->m_bPrimaryView && pWaterModule != nullptr)
         pWaterModule->SetDebugInteractionWindow(vAnchor);
     }
+    if (pWaterModule != nullptr)
+    {
+      pFrameData->m_uiProfileCount = pWaterModule->FillGpuProfileTable(pFrameData->m_Profiles);
+    }
+
     if (pWaterModule != nullptr && pCamera != nullptr)
     {
       pFrameData->m_fSimulationTime = static_cast<float>(pWaterModule->GetFixedSimulationStep().GetSeconds() * pWaterModule->GetSimulationTick());

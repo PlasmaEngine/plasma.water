@@ -10,6 +10,8 @@
 #include <WaterPlugin/Components/OceanComponent.h>
 #include <WaterPlugin/World/WaterWorldModule.h>
 
+#include <Shaders/Water/WaterProfileData.h>
+
 plCVarBool cvar_WaterDebugShowBodies("Water.Debug.ShowBodies", false, plCVarFlags::Default, "Shows authored water surface topology.");
 plCVarBool cvar_WaterDebugShowLod("Water.Debug.ShowLod", false, plCVarFlags::Default, "Shows water patch and clipmap LOD information.");
 plCVarBool cvar_WaterDebugShowFlow("Water.Debug.ShowFlow", false, plCVarFlags::Default, "Shows deterministic river flow vectors.");
@@ -232,7 +234,8 @@ namespace
       mesh.SetTangent(i, tangent.GetAsVec4(1.0f));
       mesh.SetTexCoord0(i, source.m_vTexCoord);
       mesh.SetTexCoord1(i, plVec2(source.m_fWaveAttenuation, source.m_fDepth));
-      mesh.SetColor0(i, plColorLinearUB(plColor(source.m_fProfileBlend, 0.0f, 0.0f, 1.0f)));
+      // (weight of the second profile, first profile, second profile): see DecodeWaterProfilePair in WaterProfile.h.
+      mesh.SetColor0(i, plColorLinearUB(plMath::ColorFloatToByte(plMath::Saturate(source.m_fProfileBlend)), source.m_uiProfileA, source.m_uiProfileB, 255));
     }
     for (plUInt32 i = 0; i < indices.GetCount(); i += 3)
       mesh.SetTriangleIndices(i / 3, indices[i], indices[i + 1], indices[i + 2]);
@@ -825,6 +828,56 @@ void plWaterWorldModule::CopyBodySnapshots(plDynamicArray<plWaterBodySnapshot>& 
     if (slot.m_bInUse)
       out_snapshots.PushBack(slot.m_Data);
   }
+}
+
+void plWaterFillGpuProfile(plWaterGpuProfile& out_entry, const plWaterProfileResourceDescriptor& profile, plWaterBodyType::Enum type, float fFlowSpeed)
+{
+  const bool bRiver = type == plWaterBodyType::River;
+  // The ocean always may use the spectrum, a lake only when its profile says so, a river never.
+  const bool bSpectrumAllowed = type == plWaterBodyType::Ocean || (type == plWaterBodyType::Lake && profile.m_bEnableLakeSpectrum);
+  // Reflected caustics are for finite water only. An ocean would project them over the whole scene.
+  const float fReflectedCaustics = type == plWaterBodyType::Ocean ? 0.0f : profile.m_fReflectedCaustics;
+  const plVec2 vWind = profile.m_vWindDirection.IsZero() ? plVec2(1.0f, 0.0f) : profile.m_vWindDirection;
+
+  out_entry.WaveParams = plVec4(profile.m_fWaveAmplitude, profile.m_fBaseWavelength, profile.m_fWindSpeed, profile.m_fWaveSteepness);
+  // An ocean has no current: its detail and foam drift with the wind only.
+  const bool bOcean = type == plWaterBodyType::Ocean;
+  out_entry.WindAndFlow = plVec4(vWind.x, vWind.y, bOcean ? 0.0f : fFlowSpeed, bOcean ? 0.0f : profile.m_fFlowScale);
+  out_entry.SpectrumParams = plVec4(0.0f, bSpectrumAllowed ? static_cast<float>(profile.m_uiGpuCascadeCount) : 0.0f, profile.m_fRippleMaxAmplitude, bRiver ? 1.0f : 0.0f);
+  out_entry.AbsorptionAndRoughness = plVec4(profile.m_vAbsorption.x, profile.m_vAbsorption.y, profile.m_vAbsorption.z, profile.m_fRoughness);
+  out_entry.ScatteringAndIor = plVec4(profile.m_vScattering.x, profile.m_vScattering.y, profile.m_vScattering.z, profile.m_fIndexOfRefraction);
+  out_entry.ShallowColor = profile.m_ShallowColor.GetAsVec4();
+  out_entry.DeepColor = profile.m_DeepColor.GetAsVec4();
+  out_entry.OpticalParams = plVec4(profile.m_fReflectionStrength, profile.m_fEnvironmentReflectionWeight, profile.m_fRefractionDepth, profile.m_fShoreFadeDepth);
+  out_entry.FoamParams = plVec4(profile.m_fFoamStrength, profile.m_fFoamCrestThreshold, profile.m_fFoamShoreDepth, profile.m_fRefractionStrength);
+  out_entry.SurfaceDetailParams = plVec4(profile.m_fMicroNormalScale, profile.m_fMicroNormalStrength, profile.m_fSunGlitterStrength, profile.m_fRefractionEdgeRejection);
+  out_entry.FoamMaterialParams = plVec4(profile.m_fFoamRoughness, profile.m_fFoamBreakupScale, profile.m_sFoamTexture.IsEmpty() ? 0.0f : 1.0f, profile.m_sNormalTexture.IsEmpty() ? 0.0f : 1.0f);
+  out_entry.FoamColor = profile.m_FoamColor.GetAsVec4();
+  out_entry.CausticParams = plVec4(profile.m_fUnderwaterCaustics, fReflectedCaustics, 0.0f, 0.0f);
+}
+
+plUInt32 plWaterWorldModule::FillGpuProfileTable(plArrayPtr<plWaterGpuProfile> out_entries) const
+{
+  PL_LOCK(m_Mutex);
+
+  // A body that is not there leaves a hole in the table. Holes hold the default profile, so an index that outlived
+  // its body still reads something sane.
+  const plWaterProfileResourceDescriptor defaultProfile;
+  plUInt32 uiCount = 0;
+  for (plUInt32 i = 0; i < m_Bodies.GetCount() && i < out_entries.GetCount(); ++i)
+  {
+    const BodySlot& slot = m_Bodies[i];
+    if (slot.m_bInUse)
+    {
+      plWaterFillGpuProfile(out_entries[i], slot.m_Data.m_Profile, slot.m_Data.m_Descriptor.m_Type, slot.m_Data.m_Descriptor.m_fFlowSpeed);
+      uiCount = i + 1;
+    }
+    else
+    {
+      plWaterFillGpuProfile(out_entries[i], defaultProfile, plWaterBodyType::Lake, 0.0f);
+    }
+  }
+  return uiCount;
 }
 
 void plWaterWorldModule::CopyJunctionRenderSnapshots(plDynamicArray<plWaterJunctionRenderSnapshot>& out_snapshots) const

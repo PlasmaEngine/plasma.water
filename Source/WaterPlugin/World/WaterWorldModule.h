@@ -13,6 +13,7 @@
 
 class plOceanComponent;
 struct plWaterAttachmentAnchor;
+struct plWaterGpuProfile;
 
 struct PL_WATER_DLL plWaterFiniteMeshLod
 {
@@ -188,6 +189,13 @@ public:
   bool TryGetBodyId(plGameObjectHandle hObject, plWaterBodyId& out_bodyId) const;
   bool TryGetBodySnapshot(plWaterBodyId bodyId, plWaterBodySnapshot& out_snapshot) const;
   void CopyBodySnapshots(plDynamicArray<plWaterBodySnapshot>& out_snapshots) const;
+
+  /// \brief Writes the profile table that the water shaders read: entry i is the profile of body i.
+  ///
+  /// Returns the number of entries written (one past the highest body index in use, at most uiMaxEntries). The
+  /// spectrum slot of an entry is left at zero and its cascade count holds what the profile asks for; the surface
+  /// pass replaces both with what its simulation gave the profile.
+  plUInt32 FillGpuProfileTable(plArrayPtr<plWaterGpuProfile> out_entries) const;
   void CopyJunctionRenderSnapshots(plDynamicArray<plWaterJunctionRenderSnapshot>& out_snapshots) const;
 
 private:

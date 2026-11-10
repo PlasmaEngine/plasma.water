@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RendererCore/Pipeline/Passes/ForwardRenderPass.h>
+#include <RendererCore/RenderGraph/Declarations.h>
 #include <RendererCore/Shader/ConstantBufferStorage.h>
 #include <RendererCore/Shader/ShaderResource.h>
 #include <WaterPlugin/Rendering/WaterGpuSimulation.h>
@@ -38,6 +39,9 @@ public:
   plVec3 GetMainLightDirection() const { return m_vMainLightDirection; }
   plVec3 GetMainLightColorIntensity() const { return m_vMainLightColorIntensity; }
 
+  /// \brief Entries in the profile table this pass uploaded for the current frame. At least one.
+  plUInt32 GetProfileCount() const { return m_uiProfileCount; }
+
   /// \brief Resolved settings used by renderers attached to this pass.
   const plWaterQualitySettings& GetQualitySettings() const { return m_SimulationQuality; }
 
@@ -59,6 +63,7 @@ protected:
 private:
   void FetchPerFrameWaterData(const plRenderViewContext& renderViewContext);
   void RefreshGpuSpectrumProfiles();
+  void UploadProfileTable(const plRenderGraphContext& ctx, plRenderGraphBufferHandle hProfileTable);
 
   plRenderPipelineNodeInputPin m_PinResolvedDepth;
   plRenderPipelineNodeInputPin m_PinGBuffer1;
@@ -86,6 +91,10 @@ private:
   bool m_bHasTransmittedCausticSources = false;
   bool m_bHasReflectedCausticSources = false;
   bool m_bCausticTraceExecuted = false;
+
+  /// One plWaterGpuProfile per water body of the world. See WaterProfileData.h.
+  plGALBufferHandle m_hProfileTable;
+  plUInt32 m_uiProfileCount = 1;
 
   plShaderResourceHandle m_hCausticsShader;
   plShaderResourceHandle m_hCausticsCompositeShader;

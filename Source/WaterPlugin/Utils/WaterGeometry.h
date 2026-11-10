@@ -26,8 +26,13 @@ struct PL_WATER_DLL plWaterGeometryVertex
   float m_fDepth = 0.0f;
   /// Scales displacement at this vertex. Zero pins authored shorelines and volume bottoms.
   float m_fWaveAttenuation = 1.0f;
-  /// Zero for ordinary body meshes; 0..1 across a generated junction patch.
+  /// Weight of the second profile of the pair: zero for ordinary body meshes, 0..1 across a transition.
   float m_fProfileBlend = 0.0f;
+  /// The pair of profiles this vertex blends, as indices into the profile table (the index of a body in
+  /// plWaterWorldModule). 255 means the profile of the draw that renders the mesh. All vertices of one triangle
+  /// hold the same pair.
+  plUInt8 m_uiProfileA = 255;
+  plUInt8 m_uiProfileB = 255;
 };
 
 struct PL_WATER_DLL plWaterFiniteMeshSettings

@@ -559,6 +559,7 @@ void plWaterBodyComponent::OnMsgExtractRenderData(plMsgExtractRenderData& msg) c
           FillSecondaryProfile(renderData, primarySnapshot.m_Profile, plWaterBodyType::River,
             plVec2(primarySnapshot.m_Descriptor.m_fFlowSpeed, primarySnapshot.m_Profile.m_fFlowScale));
           renderData.m_uiSecondaryGpuCascadeCount = 0;
+          renderData.m_uiSecondaryProfileIndex = junction.m_PrimaryBody.m_uiIndex;
           renderData.m_fSecondaryRippleMaxAmplitude = primarySnapshot.m_Profile.m_fRippleMaxAmplitude;
           renderData.m_fJunctionMaterialMixStrength = s_fJunctionMaterialMixStrength;
           renderData.m_uiJunctionMaterialFlowSlot = uiSlot;

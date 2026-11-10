@@ -7,6 +7,11 @@
 #include <RendererCore/Pipeline/RenderData.h>
 #include <WaterPlugin/WaterPluginDLL.h>
 
+#include <Shaders/Water/WaterProfileData.h>
+
+/// \brief Fills one entry of the profile table from a profile. See plWaterWorldModule::FillGpuProfileTable.
+PL_WATER_DLL void plWaterFillGpuProfile(plWaterGpuProfile& out_entry, const struct plWaterProfileResourceDescriptor& profile, plWaterBodyType::Enum type, float fFlowSpeed);
+
 /// \brief Immutable per-view bridge produced during extraction by the water world module.
 class PL_WATER_DLL plWaterFrameData : public plRenderData
 {
@@ -23,6 +28,10 @@ public:
   plGALTextureHandle m_hSpectrumDisplacement;
   plGALTextureHandle m_hInteractionAtlas;
   plStaticArray<plWaterInteraction, MaxInteractions> m_Interactions;
+
+  /// The profile of every water body of the world, indexed by body. plWaterSurfacePass uploads it once per frame.
+  plWaterGpuProfile m_Profiles[WATER_MAX_PROFILES];
+  plUInt32 m_uiProfileCount = 0;
 
   plVec3 m_vAbsorption = plVec3(0.15f, 0.06f, 0.025f);
   plVec3 m_vScattering = plVec3(0.015f, 0.035f, 0.055f);
