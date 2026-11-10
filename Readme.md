@@ -47,6 +47,37 @@ type, so they load without this package.
 
 This needs an engine with `plRenderPipelineInjections`. On an older engine the plugin does not build.
 
+## Where to read more
+
+- [`Docs/Water.md`](Docs/Water.md): placing water, what the profile settings do to the picture, joining bodies.
+- [`Docs/Migration-2.0.md`](Docs/Migration-2.0.md): what changes for a project that used 1.x.
+
+## How it is put together
+
+- **Profiles by index.** Every body's profile is uploaded once per frame and view as one table
+  (`Shaders/Water/WaterProfileData.h`). A draw names its entry; the vertices of a river or lake name the pair of
+  entries they blend and a weight, so one mesh can carry any number of looks.
+- **Networks.** Rivers and lakes that junctions join are meshed together (`Utils/WaterNetworkMesher`): they share
+  the vertices of every mouth line at every level of detail. A river that reaches the ocean continues as an apron.
+  Each body draws its own part.
+- **Waves.** Four deterministic swells that gameplay queries follow, plus a spectrum of N x N waves per cascade,
+  transformed on the GPU (`Shaders/Water/WaterSpectrum*.plShader`). Vertices read it at the scale of the mesh; pixels
+  add the rest as normals and roughness.
+- **Light.** One optical model on vertical depth; the sun is shadowed with the engine's shadow map at the surface.
+
+## Tests
+
+`plasmabuild build WaterTest` builds `Bin/Tests/<platform>/WaterTest`, which runs against the SDK named by
+`PLASMA_SDK_ROOT`.
+
+- **Water**: geometry, the network mesher (shared mouth vertices and no T-junction at any level of detail, open
+  mouths, plumes, aprons, rivers that fold, draw order at a mouth), ring seams, spectrum normalisation, profiles,
+  quality tiers. No GPU needed.
+- **Water Rendering Tests**: image checks on a hand-built pipeline.
+- **Water Gallery**: scenes built in code and drawn through the project's main pipeline as shipped (water is only
+  there through the injection). Saves fixed shots to `<output>/Gallery/` and a frame-time table per quality tier.
+  Pictures are the same from run to run, so two runs can be compared pixel by pixel.
+
 ## What comes from the engine, not from here
 
 The shaders (`Assets/Shaders/Water/`), their permutation variables (`Assets/Shaders/PermutationVars/`) and the
@@ -82,7 +113,7 @@ PLASMA_SDK_ROOT=/path/to/engine plasmabuild build EditorPluginWater
 ```
 
 `EnginePluginWater` is a separate target and is not pulled in by the editor plugin, so build it too.
-Output lands in `Bin/Windows_x64_Development/`.
+Output lands in `Bin/<Platform>_x64_<Configuration>/`.
 
 ## Artwork
 
