@@ -31,12 +31,12 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 
 namespace
 {
-  constexpr plUInt32 s_uiMaximumFiniteWaterVertices = 262144;
+  constexpr plUInt32 s_uiMaximumFiniteMeshVertices = 262144;
   constexpr plUInt32 s_uiMaximumFiniteWaterIndices = 3145728;
 
   bool ValidateFiniteWaterTopology(plArrayPtr<const plWaterGeometryVertex> vertices, plArrayPtr<const plUInt32> indices)
   {
-    if (vertices.IsEmpty() || indices.IsEmpty() || vertices.GetCount() > s_uiMaximumFiniteWaterVertices ||
+    if (vertices.IsEmpty() || indices.IsEmpty() || vertices.GetCount() > s_uiMaximumFiniteMeshVertices ||
         indices.GetCount() > s_uiMaximumFiniteWaterIndices || indices.GetCount() % 3 != 0)
       return false;
 

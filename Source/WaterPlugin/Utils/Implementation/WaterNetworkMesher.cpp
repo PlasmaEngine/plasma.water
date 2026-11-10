@@ -9,14 +9,14 @@ namespace
 {
   constexpr plUInt32 s_uiMaximumPartVertices = 262144;
 
-  float Cross2D(const plVec2& a, const plVec2& b, const plVec2& c)
+  float NetworkCross2D(const plVec2& a, const plVec2& b, const plVec2& c)
   {
     const plVec2 ab = b - a;
     const plVec2 ac = c - a;
     return ab.x * ac.y - ab.y * ac.x;
   }
 
-  plVec2 SafeNormalized(const plVec2& value, const plVec2& fallback)
+  plVec2 NetworkSafeNormalized(const plVec2& value, const plVec2& fallback)
   {
     const float fLengthSquared = value.GetLengthSquared();
     if (fLengthSquared <= plMath::SmallEpsilon<float>())
@@ -51,7 +51,7 @@ namespace
     /// wound the wrong way when the caller says the winding is known (bExpectCounterClockwise).
     void AddTriangle(plUInt32 a, plUInt32 b, plUInt32 c, bool bExpectCounterClockwise)
     {
-      const float fArea = Cross2D(m_Vertices[a].m_Vertex.m_vPosition.GetAsVec2(), m_Vertices[b].m_Vertex.m_vPosition.GetAsVec2(), m_Vertices[c].m_Vertex.m_vPosition.GetAsVec2());
+      const float fArea = NetworkCross2D(m_Vertices[a].m_Vertex.m_vPosition.GetAsVec2(), m_Vertices[b].m_Vertex.m_vPosition.GetAsVec2(), m_Vertices[c].m_Vertex.m_vPosition.GetAsVec2());
       if (plMath::Abs(fArea) <= 0.0000001f)
         return;
       if (fArea < 0.0f)
@@ -200,19 +200,19 @@ namespace
       const plVec2 previous = samples[i > 0 ? i - 1 : i].m_vPosition.GetAsVec2();
       const plVec2 next = samples[i + 1 < samples.GetCount() ? i + 1 : i].m_vPosition.GetAsVec2();
 
-      const plVec2 incoming = SafeNormalized(current - previous, SafeNormalized(next - current, plVec2(1.0f, 0.0f)));
-      const plVec2 outgoing = SafeNormalized(next - current, incoming);
+      const plVec2 incoming = NetworkSafeNormalized(current - previous, NetworkSafeNormalized(next - current, plVec2(1.0f, 0.0f)));
+      const plVec2 outgoing = NetworkSafeNormalized(next - current, incoming);
       const plVec2 incomingNormal(-incoming.y, incoming.x);
       const plVec2 outgoingNormal(-outgoing.y, outgoing.x);
 
-      const plVec2 miter = SafeNormalized(incomingNormal + outgoingNormal, outgoingNormal);
+      const plVec2 miter = NetworkSafeNormalized(incomingNormal + outgoingNormal, outgoingNormal);
       float fMiterScale = 1.0f / plMath::Max(plMath::Abs(miter.Dot(outgoingNormal)), 0.25f);
       const float fMiterLimit = plMath::Lerp(1.25f, 1.75f, plMath::Saturate(body.m_Settings.m_fRiverCurvatureRefinement));
       fMiterScale = plMath::Min(fMiterScale, fMiterLimit);
 
       const float fLeftWidth = plMath::Max(samples[i].m_fLeftWidth, 0.01f);
       const float fRightWidth = plMath::Max(samples[i].m_fRightWidth, 0.01f);
-      const plVec2 tangent = SafeNormalized(incoming + outgoing, outgoing);
+      const plVec2 tangent = NetworkSafeNormalized(incoming + outgoing, outgoing);
       tangents[i] = tangent;
 
       if (i > 0)
@@ -227,7 +227,7 @@ namespace
       // valid surface.
       if (i > 0)
       {
-        const plVec2 along = SafeNormalized(current - previous, tangent);
+        const plVec2 along = NetworkSafeNormalized(current - previous, tangent);
         const float fMinimumAdvance = 0.02f * fTargetEdgeLength;
         const plVec3 vPreviousLeft = out_river.m_Part.m_Vertices[(i - 1) * uiColumns].m_Vertex.m_vPosition;
         const plVec3 vPreviousRight = out_river.m_Part.m_Vertices[(i - 1) * uiColumns + uiColumns - 1].m_Vertex.m_vPosition;
@@ -454,7 +454,7 @@ namespace
         const plVec2 previous = cleaned[(i + cleaned.GetCount() - 1) % cleaned.GetCount()].GetAsVec2();
         const plVec2 current = cleaned[i].GetAsVec2();
         const plVec2 next = cleaned[(i + 1) % cleaned.GetCount()].GetAsVec2();
-        if (plMath::Abs(Cross2D(previous, current, next)) <= fEpsilon)
+        if (plMath::Abs(NetworkCross2D(previous, current, next)) <= fEpsilon)
         {
           cleaned.RemoveAtAndCopy(i);
           bRemovedPoint = true;
