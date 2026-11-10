@@ -403,8 +403,9 @@ float2 SampleWaterProfileNormalDetail(plWaterGpuProfile profile, float3 worldPos
   float2 detail1;
   if (profile.SpectrumParams.w > 0.5)
   {
-    // A river: the detail travels with the current.
-    detail0 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.xy * (0.045 * detailScale), flowVelocity * 0.025, simulationTime).xy * 2.0 - 1.0;
+    // A river: the detail travels with the current. A pattern moves against the offset its coordinates are given, so
+    // both layers are offset against the flow.
+    detail0 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.xy * (0.045 * detailScale), -flowVelocity * 0.025, simulationTime).xy * 2.0 - 1.0;
     detail1 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.yx * (0.083 * detailScale), -flowVelocity.yx * 0.017, simulationTime).xy * 2.0 - 1.0;
   }
   else
