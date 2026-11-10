@@ -1153,17 +1153,42 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
         return fPlume;
       };
 
+      // Each vertex's share of each plume, worked out once: a vertex is a corner of six triangles. Most of a lake is
+      // further from every mouth than its plume reaches, which a circle around the mouth line tells without measuring.
+      const plUInt32 uiPlumeCount = plumes.GetCount();
+      plDynamicArray<float> plumeShares;
+      plumeShares.SetCount(work.m_Vertices.GetCount() * uiPlumeCount);
+      for (plUInt32 uiPlume = 0; uiPlume < uiPlumeCount; ++uiPlume)
+      {
+        const auto& chain = plumes[uiPlume].m_pMouth->m_Chain;
+        const plVec2 vFirst = work.m_Vertices[chain[0]].m_Vertex.m_vPosition.GetAsVec2();
+        plVec2 vCenter = plVec2::MakeZero();
+        for (plUInt32 uiVertex : chain)
+          vCenter += work.m_Vertices[uiVertex].m_Vertex.m_vPosition.GetAsVec2();
+        vCenter /= static_cast<float>(chain.GetCount());
+        float fReach = (vFirst - vCenter).GetLength();
+        for (plUInt32 uiVertex : chain)
+          fReach = plMath::Max(fReach, (work.m_Vertices[uiVertex].m_Vertex.m_vPosition.GetAsVec2() - vCenter).GetLength());
+        fReach += plumes[uiPlume].m_fLength;
+
+        for (plUInt32 uiVertex = 0; uiVertex < work.m_Vertices.GetCount(); ++uiVertex)
+        {
+          const plVec2 vPosition = work.m_Vertices[uiVertex].m_Vertex.m_vPosition.GetAsVec2();
+          plumeShares[uiVertex * uiPlumeCount + uiPlume] = (vPosition - vCenter).GetLengthSquared() >= fReach * fReach ? 0.0f : plumeAt(vPosition, uiPlume);
+        }
+      }
+
       for (plUInt32 i = 0; i + 2 < work.m_Indices.GetCount(); i += 3)
       {
         const plUInt32 corners[3] = {work.m_Indices[i], work.m_Indices[i + 1], work.m_Indices[i + 2]};
 
         plUInt32 uiBestPlume = plInvalidIndex;
         float fBest = 0.0f;
-        for (plUInt32 uiPlume = 0; uiPlume < plumes.GetCount(); ++uiPlume)
+        for (plUInt32 uiPlume = 0; uiPlume < uiPlumeCount; ++uiPlume)
         {
           float fSum = 0.0f;
           for (plUInt32 uiCorner : corners)
-            fSum += plumeAt(work.m_Vertices[uiCorner].m_Vertex.m_vPosition.GetAsVec2(), uiPlume);
+            fSum += plumeShares[uiCorner * uiPlumeCount + uiPlume];
           if (fSum > fBest)
           {
             fBest = fSum;
@@ -1183,7 +1208,7 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
           // The pair is (river, lake), as on the river's side of the mouth: the weight is the lake's share, which is the
           // mouth weight on the mouth line and one where the plume ends.
           const Plume& plume = plumes[uiBestPlume];
-          const float fPlume = plumeAt(vertex.m_Vertex.m_vPosition.GetAsVec2(), uiBestPlume);
+          const float fPlume = plumeShares[uiCorner * uiPlumeCount + uiBestPlume];
           WorkVertex flowing = vertex;
           flowing.m_Vertex.m_vFlow = plume.m_vFlow;
           flowing.m_Vertex.m_vTexCoord = plume.m_pMouth->RibbonCoordinates(vertex.m_Vertex.m_vPosition);
