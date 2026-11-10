@@ -22,6 +22,7 @@ struct PL_WATER_DLL plWaterFiniteMeshLod
   plUInt32 m_uiSurfacePrimitiveCount = 0;
   plUInt32 m_uiVolumePrimitiveCount = 0;
   float m_fMaximumDistanceScale = 2.0f;
+  plUInt8 m_uiLevel = 0; ///< 0 is the full mesh. Each level doubles the edge length.
 };
 
 /// \brief World-space authored data used to register or update a water body.
@@ -259,9 +260,15 @@ private:
 
   /// Rivers and lakes that junctions join are meshed together, as one network (plWaterNetworkMesher). These rebuild
   /// the networks that the given bodies are in: their meshes at every LOD, their volumes, and what became of each junction.
-  void RebuildNetworks(plArrayPtr<const plUInt32> seedBodies);
-  void RebuildNetworksAround(plUInt32 uiBody);
-  void RebuildNetwork(plArrayPtr<const plUInt32> networkBodies, plArrayPtr<const plUInt32> networkJunctions);
+  ///
+  /// A draft builds only the coarsest level, which takes a fraction of the time. A body that changes while it already
+  /// has a mesh gets a draft at the next update, a junction that changes gets one at once, and both get the full
+  /// meshes when they have been left alone for a moment (s_fDraftSettleSeconds). So dragging a spline point does not
+  /// wait for the full meshes at every step.
+  void RebuildNetworks(plArrayPtr<const plUInt32> seedBodies, bool bDraft = false);
+  void RebuildNetworksAround(plUInt32 uiBody, bool bDraft = false);
+  void RebuildNetwork(plArrayPtr<const plUInt32> networkBodies, plArrayPtr<const plUInt32> networkJunctions, bool bDraft);
+  void RebuildDraftNow(plArrayPtr<const plUInt32> seedBodies);
   void CollectNetwork(plUInt32 uiSeedBody, plDynamicArray<plUInt32>& out_bodies, plDynamicArray<plUInt32>& out_junctions) const;
   void CollectJunctionNeighbours(plUInt32 uiBody, plDynamicArray<plUInt32>& out_bodies) const;
   /// True for a junction between a river and a lake or ocean, which is what the mesher joins.
@@ -290,5 +297,11 @@ private:
   plUInt64 m_uiSimulationTick = 0;
   double m_fSimulationAccumulator = 0.0;
   plTime m_LastWallClockTime;
+  /// Bodies that changed since the last update and have not had their draft yet.
+  plHybridArray<plUInt32, 8> m_BodiesAwaitingDraft;
+  /// Bodies whose networks hold draft meshes, and when the last draft was built.
+  plHybridArray<plUInt32, 8> m_BodiesAwaitingFullMeshes;
+  plTime m_LastDraftTime;
   static constexpr double s_fFixedStepSeconds = 1.0 / 60.0;
+  static constexpr double s_fDraftSettleSeconds = 0.35;
 };

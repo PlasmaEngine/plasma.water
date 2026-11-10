@@ -206,6 +206,27 @@ void plWaterWorldModule::Update(const plWorldModule::UpdateContext& context)
     // The mesh settings, mix lengths and mouth weights all come from profiles.
     for (plUInt32 uiBody : reloaded)
       RebuildNetworksAround(uiBody);
+
+    // Bodies that changed since the last update get their draft: one for however many changes there were.
+    if (!m_BodiesAwaitingDraft.IsEmpty())
+    {
+      plHybridArray<plUInt32, 16> seeds;
+      for (plUInt32 uiBody : m_BodiesAwaitingDraft)
+      {
+        seeds.PushBack(uiBody);
+        CollectJunctionNeighbours(uiBody, seeds);
+      }
+      m_BodiesAwaitingDraft.Clear();
+      RebuildDraftNow(seeds);
+    }
+
+    // Drafts that have been left alone for a moment are replaced by the full meshes.
+    if (!m_BodiesAwaitingFullMeshes.IsEmpty() && (wallClockNow - m_LastDraftTime).GetSeconds() >= s_fDraftSettleSeconds)
+    {
+      const plHybridArray<plUInt32, 8> settled = m_BodiesAwaitingFullMeshes;
+      m_BodiesAwaitingFullMeshes.Clear();
+      RebuildNetworks(settled);
+    }
   }
 
   {
@@ -460,9 +481,20 @@ bool plWaterWorldModule::UpdateBody(plWaterBodyId bodyId, const plWaterBodyDescr
     return false;
 
   BodySlot& slot = m_Bodies[bodyId.m_uiIndex];
+  const bool bHadMesh = !slot.m_Data.m_FiniteMeshLods.IsEmpty();
   PrepareBody(slot, descriptor);
   slot.m_Data.m_BodyId = bodyId;
-  RebuildNetworksAround(bodyId.m_uiIndex);
+  if (bHadMesh)
+  {
+    // A body that is being edited changes many times a second, and often more than once a frame. It keeps the mesh
+    // it has until the next update, which builds one draft for all of its changes.
+    if (!m_BodiesAwaitingDraft.Contains(bodyId.m_uiIndex))
+      m_BodiesAwaitingDraft.PushBack(bodyId.m_uiIndex);
+  }
+  else
+  {
+    RebuildNetworksAround(bodyId.m_uiIndex);
+  }
   return true;
 }
 
@@ -505,14 +537,25 @@ void plWaterWorldModule::CollectJunctionNeighbours(plUInt32 uiBody, plDynamicArr
   }
 }
 
-void plWaterWorldModule::RebuildNetworksAround(plUInt32 uiBody)
+void plWaterWorldModule::RebuildNetworksAround(plUInt32 uiBody, bool bDraft)
 {
   // The body's own network, and the networks of everything a junction ties it to: an ocean is in no network, but
   // the rivers that reach it carry its level and its profile in their aprons.
   plHybridArray<plUInt32, 8> seeds;
   seeds.PushBack(uiBody);
   CollectJunctionNeighbours(uiBody, seeds);
-  RebuildNetworks(seeds);
+  RebuildNetworks(seeds, bDraft);
+}
+
+void plWaterWorldModule::RebuildDraftNow(plArrayPtr<const plUInt32> seedBodies)
+{
+  RebuildNetworks(seedBodies, true);
+  for (plUInt32 uiBody : seedBodies)
+  {
+    if (!m_BodiesAwaitingFullMeshes.Contains(uiBody))
+      m_BodiesAwaitingFullMeshes.PushBack(uiBody);
+  }
+  m_LastDraftTime = plTime::Now();
 }
 
 void plWaterWorldModule::ResetJunctionRenderData(JunctionSlot& junction)
@@ -593,7 +636,8 @@ bool plWaterWorldModule::UpdateJunction(plUInt32 uiIndex, const plWaterJunctionD
   const plUInt32 seeds[] = {m_Junctions[uiIndex].m_Data.m_BodyA.m_uiIndex, m_Junctions[uiIndex].m_Data.m_BodyB.m_uiIndex, descriptor.m_BodyA.m_uiIndex, descriptor.m_BodyB.m_uiIndex};
   m_Junctions[uiIndex].m_Data = descriptor;
   ResetJunctionRenderData(m_Junctions[uiIndex]);
-  RebuildNetworks(seeds);
+  // A junction that is being moved changes many times a second, like a body that is being edited.
+  RebuildDraftNow(seeds);
   return true;
 }
 
@@ -910,7 +954,7 @@ void plWaterWorldModule::CollectNetwork(plUInt32 uiSeedBody, plDynamicArray<plUI
   }
 }
 
-void plWaterWorldModule::RebuildNetworks(plArrayPtr<const plUInt32> seedBodies)
+void plWaterWorldModule::RebuildNetworks(plArrayPtr<const plUInt32> seedBodies, bool bDraft)
 {
   plHybridArray<plUInt32, 16> done;
   plDynamicArray<plUInt32> networkBodies;
@@ -924,12 +968,19 @@ void plWaterWorldModule::RebuildNetworks(plArrayPtr<const plUInt32> seedBodies)
       continue;
     for (plUInt32 uiBody : networkBodies)
       done.PushBack(uiBody);
-    RebuildNetwork(networkBodies, networkJunctions);
+    RebuildNetwork(networkBodies, networkJunctions, bDraft);
   }
 }
 
-void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies, plArrayPtr<const plUInt32> networkJunctions)
+void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies, plArrayPtr<const plUInt32> networkJunctions, bool bDraft)
 {
+  if (!bDraft)
+  {
+    // The full meshes are being built now, whatever asked for them.
+    for (plUInt32 uiBody : networkBodies)
+      m_BodiesAwaitingFullMeshes.RemoveAndSwap(uiBody);
+  }
+
   // What the mesher needs of each body.
   plDynamicArray<plWaterNetworkBody> bodies;
   bodies.SetCount(networkBodies.GetCount());
@@ -1017,16 +1068,17 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
     source.m_fDirectionSign = bInflow ? 1.0f : -1.0f;
   }
 
-  // Three levels of detail, each a conforming network of its own.
+  // Three levels of detail, each a conforming network of its own. A draft is the coarsest of them alone.
   constexpr plUInt32 uiLodCount = 3;
+  const plUInt32 uiFirstLod = bDraft ? uiLodCount - 1 : 0;
   plWaterNetworkMesh meshes[uiLodCount];
-  for (plUInt32 uiLod = 0; uiLod < uiLodCount; ++uiLod)
+  for (plUInt32 uiLod = uiFirstLod; uiLod < uiLodCount; ++uiLod)
     plWaterNetworkMesher::Build(bodies, joins, uiLod, meshes[uiLod]);
 
   for (plUInt32 i = 0; i < networkBodies.GetCount(); ++i)
   {
     plWaterBodySnapshot& body = m_Bodies[networkBodies[i]].m_Data;
-    const plWaterNetworkPart& part = meshes[0].m_Parts[i];
+    const plWaterNetworkPart& part = meshes[uiFirstLod].m_Parts[i];
     if (!part.m_bValid)
     {
       if (body.m_bGeometryValid)
@@ -1042,7 +1094,7 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
     const plUInt32 uiRevision = body.m_uiGeometryRevision + 1;
     plHybridArray<plWaterFiniteMeshLod, 3> lods;
     bool bFailed = false;
-    for (plUInt32 uiLod = 0; uiLod < uiLodCount; ++uiLod)
+    for (plUInt32 uiLod = uiFirstLod; uiLod < uiLodCount; ++uiLod)
     {
       const plWaterNetworkPart& lodPart = meshes[uiLod].m_Parts[i];
       if (!lodPart.m_bValid)
@@ -1052,7 +1104,7 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
       plDynamicArray<plUInt32> volumeIndices;
       if (!plWaterNetworkMesher::BuildVolume(lodPart.m_TopologyVertices, lodPart.m_TopologyIndices, body.m_Descriptor.m_fDefaultDepth, volumeVertices, volumeIndices))
       {
-        bFailed = uiLod == 0;
+        bFailed = uiLod == uiFirstLod;
         break;
       }
 
@@ -1065,9 +1117,10 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
       lod.m_hVolumeMesh = CreateFiniteWaterMesh(volumeVertices, volumeIndices, body.m_Descriptor.m_uiNetworkId, uiRevision, sVolume);
       if (!lod.m_hSurfaceMesh.IsValid() || !lod.m_hVolumeMesh.IsValid())
       {
-        bFailed = uiLod == 0;
+        bFailed = uiLod == uiFirstLod;
         break;
       }
+      lod.m_uiLevel = static_cast<plUInt8>(uiLod);
       lod.m_uiSurfacePrimitiveCount = lodPart.m_Indices.GetCount() / 3;
       lod.m_uiVolumePrimitiveCount = volumeIndices.GetCount() / 3;
       lod.m_fMaximumDistanceScale = uiLod == 0 ? 2.0f : (uiLod == 1 ? 6.0f : plMath::HighValue<float>());
@@ -1107,7 +1160,7 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
   {
     const JoinSource& source = joinSources[uiJoin];
     const plWaterNetworkJoin& join = joins[uiJoin];
-    const plWaterNetworkJoinResult& result = meshes[0].m_Joins[uiJoin];
+    const plWaterNetworkJoinResult& result = meshes[uiFirstLod].m_Joins[uiJoin];
     plWaterJunctionRenderSnapshot& render = m_Junctions[source.m_uiJunction].m_RenderData;
     const plWaterBodySnapshot& receiver = m_Bodies[source.m_uiReceiverBody].m_Data;
 
@@ -1129,7 +1182,7 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
     render.m_fMixLengthRiver = join.m_fMixLengthRiver;
     render.m_fMixLengthReceiver = join.m_fMixLengthReceiver;
     render.m_fMouthWeight = join.m_fMouthWeight;
-    for (plUInt32 uiLod = 0; uiLod < uiLodCount; ++uiLod)
+    for (plUInt32 uiLod = uiFirstLod; uiLod < uiLodCount; ++uiLod)
     {
       const plWaterNetworkJoinResult& lodResult = meshes[uiLod].m_Joins[uiJoin];
       render.m_uiSharedVertexCount[uiLod] = lodResult.m_bValid ? lodResult.m_uiSharedVertexCount : 0;
