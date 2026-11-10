@@ -145,11 +145,11 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
     junctionConstants->JunctionCutout0 = plVec4(pRenderData->m_Cutouts[0].m_vCenter.x, pRenderData->m_Cutouts[0].m_vCenter.y,
       pRenderData->m_Cutouts[0].m_vDirection.x, pRenderData->m_Cutouts[0].m_vDirection.y);
     junctionConstants->JunctionCutout1 = plVec4(pRenderData->m_Cutouts[0].m_fHalfLength, pRenderData->m_Cutouts[0].m_fStartHalfWidth,
-      pRenderData->m_Cutouts[0].m_fEndHalfWidth, pRenderData->m_Cutouts[0].m_fEnabled);
+      pRenderData->m_Cutouts[0].m_fEndHalfWidth, pRenderData->m_Cutouts[0].m_fHoldFraction);
     junctionConstants->JunctionCutout2 = plVec4(pRenderData->m_Cutouts[1].m_vCenter.x, pRenderData->m_Cutouts[1].m_vCenter.y,
       pRenderData->m_Cutouts[1].m_vDirection.x, pRenderData->m_Cutouts[1].m_vDirection.y);
     junctionConstants->JunctionCutout3 = plVec4(pRenderData->m_Cutouts[1].m_fHalfLength, pRenderData->m_Cutouts[1].m_fStartHalfWidth,
-      pRenderData->m_Cutouts[1].m_fEndHalfWidth, pRenderData->m_Cutouts[1].m_fEnabled);
+      pRenderData->m_Cutouts[1].m_fEndHalfWidth, pRenderData->m_Cutouts[1].m_fHoldFraction);
     junctionConstants->MainLightDirection = plVec4(vMainLightDirection.x, vMainLightDirection.y, vMainLightDirection.z, 0.0f);
     junctionConstants->MainLightColorIntensity = plVec4(vMainLightColorIntensity.x, vMainLightColorIntensity.y, vMainLightColorIntensity.z, 0.0f);
     junctionConstants->InteractionWindowParams = vInteractionWindowParams;

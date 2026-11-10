@@ -10,9 +10,9 @@
 CONSTANT_BUFFER2(plWaterJunctionConstants, 7, BG_DRAW_CALL)
 {
   FLOAT4(JunctionCutout0);      // first cutout: center.xy, direction.xy
-  FLOAT4(JunctionCutout1);      // first cutout: halfLength, startHalfWidth, endHalfWidth, enabled
+  FLOAT4(JunctionCutout1);      // first cutout: halfLength (0: none), startHalfWidth, endHalfWidth, share of the length that keeps the start width
   FLOAT4(JunctionCutout2);      // second cutout: center.xy, direction.xy
-  FLOAT4(JunctionCutout3);      // second cutout: halfLength, startHalfWidth, endHalfWidth, enabled
+  FLOAT4(JunctionCutout3);      // second cutout: halfLength (0: none), startHalfWidth, endHalfWidth, share of the length that keeps the start width
   FLOAT4(MainLightDirection);   // xyz: direction from the surface towards the light, w: unused
   FLOAT4(MainLightColorIntensity); // rgb: light color * intensity (physical units), w: unused
   FLOAT4(InteractionWindowParams); // xy: world-space center of the valid interaction window (camera anchor), z: inner half extent in meters, w: atlas contains live data

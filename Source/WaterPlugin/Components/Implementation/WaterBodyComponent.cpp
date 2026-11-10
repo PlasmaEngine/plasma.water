@@ -484,7 +484,7 @@ void plWaterBodyComponent::OnMsgExtractRenderData(plMsgExtractRenderData& msg) c
         slot.m_fHalfLength = cutout.m_fHalfLength;
         slot.m_fStartHalfWidth = cutout.m_fStartHalfWidth;
         slot.m_fEndHalfWidth = cutout.m_fEndHalfWidth;
-        slot.m_fEnabled = 1.0f;
+        slot.m_fHoldFraction = cutout.m_fHoldFraction;
         if (++uiSlot == PL_ARRAY_SIZE(pRenderData->m_Cutouts))
           break;
       }

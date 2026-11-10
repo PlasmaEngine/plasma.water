@@ -483,14 +483,17 @@ float SampleWaterFoamBreakup(plWaterGpuProfile profileA, plWaterGpuProfile profi
 // choppy waves carry pixels across the analytic boundary, discarding surface the patch does not cover.
 bool InsideJunctionCutout(float2 baseWorldXY, float4 cutout, float4 dimensions)
 {
-  if (dimensions.w < 0.5 || dimensions.x <= 0.0)
+  if (dimensions.x <= 0.0)
     return false;
   const float2 direction = dot(cutout.zw, cutout.zw) > 1.0e-10 ? normalize(cutout.zw) : float2(1.0, 0.0);
   const float2 perpendicular = float2(-direction.y, direction.x);
   const float2 delta = baseWorldXY - cutout.xy;
   const float longitudinal = dot(delta, direction);
   const float t = longitudinal / (dimensions.x * 2.0) + 0.5;
-  const float halfWidth = lerp(dimensions.y, dimensions.z, saturate(t));
+  // Up the river the cutout has the river's width. From the river's end it widens as the apron's fan does (the same
+  // easing over the same stretch), so it never reaches past the fan's edge.
+  const float widen = saturate((t - dimensions.w) / max(1.0 - dimensions.w, 1.0e-4));
+  const float halfWidth = lerp(dimensions.y, dimensions.z, widen * widen * (3.0 - 2.0 * widen));
   return t >= 0.0 && t <= 1.0 && abs(dot(delta, perpendicular)) <= halfWidth;
 }
 

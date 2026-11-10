@@ -83,7 +83,7 @@ struct PL_WATER_DLL plWaterBodyRenderInfo
   bool m_bGeometryValid = false;
 };
 
-/// \brief A trapezoid of ocean that a river's apron covers. Same form as plWaterRenderData::Cutout.
+/// \brief The ocean that a river's apron covers. Same form as plWaterRenderData::Cutout.
 struct PL_WATER_DLL plWaterOceanCutout
 {
   PL_DECLARE_POD_TYPE();
@@ -93,6 +93,7 @@ struct PL_WATER_DLL plWaterOceanCutout
   float m_fHalfLength = 0.0f;
   float m_fStartHalfWidth = 0.0f;
   float m_fEndHalfWidth = 0.0f;
+  float m_fHoldFraction = 0.0f;
 };
 
 struct PL_WATER_DLL plWaterJunctionDescriptor
@@ -148,6 +149,7 @@ struct PL_WATER_DLL plWaterJunctionRenderSnapshot
   float m_fCutoutHalfLength = 0.0f;
   float m_fStartHalfWidth = 0.0f;
   float m_fEndHalfWidth = 0.0f;
+  float m_fCutoutHoldFraction = 0.0f;
 
   /// The current that queries see in the receiver. The field axis points from the mouth line into the receiver;
   /// DirectionSign is +1 where the river flows in and -1 where the receiver drains into the river.

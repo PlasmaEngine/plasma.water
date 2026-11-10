@@ -55,13 +55,15 @@ struct PL_WATER_DLL plWaterNetworkJoinResult
   plUInt32 m_uiSharedVertexCount = 0;
   float m_fMaximumSeamError = 0.0f;
 
-  /// Ocean joins only: the part of the apron inside which the ocean does not need to draw. A trapezoid from the river's
-  /// end towards the sea, in the form the ocean shader tests (see plWaterRenderData::Cutout).
+  /// Ocean joins only: the part of the apron inside which the ocean does not need to draw. A strip of the river's
+  /// width from a little way up the river to its end, which then widens as the apron does, in the form the ocean
+  /// shader tests (see plWaterRenderData::Cutout).
   plVec2 m_vCutoutCenter = plVec2::MakeZero();
   plVec2 m_vCutoutDirection = plVec2(1.0f, 0.0f);
   float m_fCutoutHalfLength = 0.0f;
   float m_fCutoutStartHalfWidth = 0.0f;
   float m_fCutoutEndHalfWidth = 0.0f;
+  float m_fCutoutHoldFraction = 0.0f; ///< Share of the length, from the start, that keeps the start width.
 };
 
 /// \brief The mesh of one body within its network.

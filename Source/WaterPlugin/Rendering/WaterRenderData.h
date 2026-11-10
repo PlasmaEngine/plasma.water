@@ -70,8 +70,9 @@ public:
   float m_fUnderwaterDistortion = 0.18f;
   float m_fUnderwaterLightShafts = 0.12f;
 
-  /// A trapezoid that an ocean patch leaves out: the inside of a river's apron. From m_vCenter, half the length either
-  /// way along m_vDirection, half the start width at the river's side and half the end width at the sea's.
+  /// What an ocean patch leaves out: the inside of a river's apron. From m_vCenter, half the length either way along
+  /// m_vDirection. It keeps half the start width for the hold fraction of its length (the stretch up the river), then
+  /// widens to half the end width at the sea's side, eased as the apron's fan is. No length, no cutout.
   struct Cutout
   {
     plVec2 m_vCenter = plVec2::MakeZero();
@@ -79,7 +80,7 @@ public:
     float m_fHalfLength = 0.0f;
     float m_fStartHalfWidth = 0.0f;
     float m_fEndHalfWidth = 0.0f;
-    float m_fEnabled = 0.0f;
+    float m_fHoldFraction = 0.0f;
   };
   Cutout m_Cutouts[2];
 

@@ -941,12 +941,15 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
       const float fPureSide = 0.3f;  // and so is the outer 30% of each side.
       const float fEndHeight = river.m_vEndCenter[uiEnd].z;
       const plVec2 vFlow = (uiEnd == 1 ? vOutward : -vOutward) * river.m_fFlowScale[uiEnd];
+      // The fan is fully open where the ocean's cutout ends, and straight from there. The cutout widens by the same
+      // curve over the same stretch, so it stays inside the fan all the way.
+      const float fSpreadEnd = 1.0f - fPureBand * 0.5f;
 
       plUInt32 uiPreviousRowStart = plInvalidIndex;
       for (plUInt32 uiApronRow = 1; uiApronRow <= uiApronRows; ++uiApronRow)
       {
         const float u = static_cast<float>(uiApronRow) / static_cast<float>(uiApronRows);
-        const float fSpread = plMath::SmoothStep(u, 0.0f, 1.0f);
+        const float fSpread = plMath::SmoothStep(u, 0.0f, fSpreadEnd);
         const float fRowLeft = fLeftWidth + fFlare * fSpread;
         const float fRowRight = fRightWidth + fFlare * fSpread;
         const plVec2 vCenter = river.m_vEndCenter[uiEnd].GetAsVec2() + vOutward * (fLength * u);
@@ -993,19 +996,20 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
 
       // What the ocean may skip: the apron's inside, from a little way up the river to where the apron turns pure ocean.
       const float fUpstream = plMath::Min((fLeftWidth + fRightWidth), river.m_fLength * 0.25f);
-      const float fCutEnd = fLength * (1.0f - fPureBand * 0.5f);
+      const float fCutEnd = fLength * fSpreadEnd;
       const plVec2 vMiddleOffset = vLeft * ((fLeftWidth - fRightWidth) * 0.5f);
       const plVec2 vCutStart = river.m_vEndCenter[uiEnd].GetAsVec2() + vMiddleOffset - vOutward * fUpstream;
       const plVec2 vCutEnd = river.m_vEndCenter[uiEnd].GetAsVec2() + vMiddleOffset + vOutward * fCutEnd;
       const float fInside = 1.0f - fPureSide * 0.25f;
       const float fHalfWidthAtRiver = (fLeftWidth + fRightWidth) * 0.5f;
-      const float fHalfWidthAtCutEnd = (fHalfWidthAtRiver + fFlare * plMath::SmoothStep(fCutEnd / fLength, 0.0f, 1.0f)) * fInside;
       result.m_vCutoutCenter = (vCutStart + vCutEnd) * 0.5f;
       result.m_vCutoutDirection = vOutward;
       result.m_fCutoutHalfLength = (fUpstream + fCutEnd) * 0.5f;
-      // The trapezoid's sides are straight and the apron's flare is not: stay inside the flare by starting narrow.
-      result.m_fCutoutStartHalfWidth = fHalfWidthAtRiver * 0.92f;
-      result.m_fCutoutEndHalfWidth = plMath::Max(fHalfWidthAtCutEnd, fHalfWidthAtRiver * 0.92f);
+      // Up the river the cutout is as wide as the river, a little less. From the river's end it widens as the fan
+      // does, by the same share of both widths, so no ocean is left out where the fan does not draw.
+      result.m_fCutoutStartHalfWidth = fHalfWidthAtRiver * fInside;
+      result.m_fCutoutEndHalfWidth = (fHalfWidthAtRiver + fFlare) * fInside;
+      result.m_fCutoutHoldFraction = fUpstream / plMath::Max(fUpstream + fCutEnd, 0.0001f);
     }
 
     PL_IGNORE_UNUSED(body);

@@ -716,6 +716,7 @@ void plWaterWorldModule::CopyOceanCutouts(plWaterBodyId oceanId, plDynamicArray<
     cutout.m_fHalfLength = render.m_fCutoutHalfLength;
     cutout.m_fStartHalfWidth = render.m_fStartHalfWidth;
     cutout.m_fEndHalfWidth = render.m_fEndHalfWidth;
+    cutout.m_fHoldFraction = render.m_fCutoutHoldFraction;
   }
 }
 
@@ -1140,6 +1141,7 @@ void plWaterWorldModule::RebuildNetwork(plArrayPtr<const plUInt32> networkBodies
     render.m_fCutoutHalfLength = result.m_fCutoutHalfLength;
     render.m_fStartHalfWidth = result.m_fCutoutStartHalfWidth;
     render.m_fEndHalfWidth = result.m_fCutoutEndHalfWidth;
+    render.m_fCutoutHoldFraction = result.m_fCutoutHoldFraction;
 
     // The current that queries see in the receiver: a plume from the middle of the mouth line.
     const float fHalfWidth = (result.m_vMouthLeft - result.m_vMouthRight).GetLength() * 0.5f;
