@@ -33,6 +33,8 @@ struct PL_WATER_DLL plWaterGeometryVertex
   /// hold the same pair.
   plUInt8 m_uiProfileA = 255;
   plUInt8 m_uiProfileB = 255;
+  /// How ragged the front between the two profiles is drawn, 0..1. The junction's Front Breakup.
+  float m_fFrontBreakup = 0.0f;
 };
 
 struct PL_WATER_DLL plWaterFiniteMeshSettings
@@ -91,6 +93,14 @@ public:
 
   /// Triangulates a simple concave XY polygon, refines long edges and regularizes internal diagonals.
   static plResult TriangulateLake(plArrayPtr<const plVec3> boundary, plDynamicArray<plWaterGeometryVertex>& out_vertices,
+    plDynamicArray<plUInt32>& out_indices, float fEpsilon = 0.001f,
+    const plWaterFiniteMeshSettings& settings = plWaterFiniteMeshSettings());
+
+  /// The triangulation step of TriangulateLake on its own: takes the outline as given, without removing collinear or
+  /// duplicate points first. So a point placed on a straight shore (the end of a river mouth, for one) stays a vertex,
+  /// and out_vertices[i] is boundary[i] for every point of the outline. The outline has to be a simple polygon.
+  /// Edges longer than the target length are split at their midpoint, on the outline as well as inside.
+  static plResult TriangulateLakePolygon(plArrayPtr<const plVec3> boundary, plDynamicArray<plWaterGeometryVertex>& out_vertices,
     plDynamicArray<plUInt32>& out_indices, float fEpsilon = 0.001f,
     const plWaterFiniteMeshSettings& settings = plWaterFiniteMeshSettings());
 

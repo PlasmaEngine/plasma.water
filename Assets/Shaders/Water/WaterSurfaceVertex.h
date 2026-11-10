@@ -72,7 +72,6 @@ WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseW
 VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float waveAttenuation,
   float2 vertexFlowDirection, float4 profilePair)
 {
-  const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
   const uint spectrumLayers = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).y;
   const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
 
@@ -88,8 +87,12 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   {
     const WaterWaveField other = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexB), baseWorldPosition, waveAttenuation,
       vertexFlowDirection, simulationTime, spectrumLayers);
-    field.Offset = lerp(field.Offset, other.Offset, profileBlend);
-    field.Gradient = lerp(field.Gradient, other.Gradient, profileBlend);
+    // Two wave fields that have nothing to do with each other: a plain cross-fade would leave the water flattest
+    // where they are mixed half and half. Weights whose squares add up to one keep the wave energy level across the mix.
+    const float weightA = sqrt(1.0 - profileBlend);
+    const float weightB = sqrt(profileBlend);
+    field.Offset = field.Offset * weightA + other.Offset * weightB;
+    field.Gradient = field.Gradient * weightA + other.Gradient * weightB;
     field.Foam = lerp(field.Foam, other.Foam, profileBlend);
     field.RippleCeiling = lerp(field.RippleCeiling, other.RippleCeiling, profileBlend);
   }
@@ -112,18 +115,6 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
     // can invert adjacent triangles; the resulting vertical fans were previously mistaken for tessellation.
     waveOffset.z += interaction.x * waveAttenuation;
     waveNormal = normalize(waveNormal + float3(-interactionGradient, 0.0) * waveAttenuation);
-
-    // Continue the signed river current across the topology bridge and onto the lake's own mesh. The field is
-    // compact and zero on every boundary, so this adds real moving geometry without opening a new junction seam.
-    if (geometryType == 2u || geometryType == 4u || geometryType == 5u || geometryType == 6u)
-    {
-      float currentHeight;
-      float2 currentGradient;
-      EvaluateWaterJunctionCurrentRipples(baseWorldPosition.xy, simulationTime, currentHeight, currentGradient);
-      waveOffset.z += currentHeight * waveAttenuation;
-      const float2 analyticGradient = -waveNormal.xy / max(waveNormal.z, 0.1);
-      waveNormal = normalize(float3(-(analyticGradient + currentGradient * waveAttenuation), 1.0));
-    }
   }
 
   VS_OUT output = (VS_OUT)0;
@@ -133,15 +124,8 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   output.BaseWorldXY = baseWorldPosition.xy;
   output.SpectrumFoam = saturate(field.Foam) * waveAttenuation;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
-  float2 outputFlowDirection = vertexFlowDirection;
-  if (geometryType == 2u || geometryType == 4u || geometryType == 5u || geometryType == 6u)
-  {
-    const float2 junctionVelocity = EvaluateWaterJunctionFlow(baseWorldPosition.xy).xy;
-    if (dot(junctionVelocity, junctionVelocity) > 1.0e-10)
-      outputFlowDirection = normalize(junctionVelocity);
-  }
-  output.Tangent = float3(outputFlowDirection, 0.0);
-  output.BiTangent = float3(-outputFlowDirection.y, outputFlowDirection.x, 0.0);
+  output.Tangent = float3(vertexFlowDirection, 0.0);
+  output.BiTangent = float3(-vertexFlowDirection.y, vertexFlowDirection.x, 0.0);
   output.TexCoord1 = float2(waveAttenuation, 0.0);
   output.Color0 = profilePair;
 #endif
@@ -151,10 +135,6 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   output.Position = float4(fieldPosition.x, -fieldPosition.y, 0.5, 1.0);
 #else
   output.Position = mul(GetWorldToScreenMatrix(), float4(output.WorldPosition, 1.0));
-#endif
-#if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE && RENDER_PASS == RENDER_PASS_FORWARD
-  if (GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).z >= 2u && geometryType == 5u)
-    output.Position.z = 0.0001 * output.Position.w;
 #endif
 #if CAMERA_MODE == CAMERA_MODE_STEREO
   output.RenderTargetArrayIndex = s_ActiveCameraEyeIndex;

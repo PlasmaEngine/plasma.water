@@ -67,6 +67,34 @@ struct PL_WATER_DLL plWaterBodySnapshot
   bool m_bGeometryValid = false;
 };
 
+/// \brief The part of plWaterBodySnapshot that is drawn from.
+struct PL_WATER_DLL plWaterBodyRenderInfo
+{
+  plWaterBodyId m_BodyId;
+  plEnum<plWaterBodyType> m_Type;
+  float m_fBaseHeight = 0.0f;
+  float m_fOceanPatchSize = 64.0f;
+  float m_fFlowSpeed = 1.0f;
+  plWaterProfileResourceDescriptor m_Profile;
+  plBoundingBox m_WorldBounds = plBoundingBox::MakeInvalid();
+  plHybridArray<plWaterFiniteMeshLod, 3> m_FiniteMeshLods;
+  plDynamicArray<plWaterOceanClipmapPatch> m_OceanPatches;
+  plUInt32 m_uiGeometryRevision = 0;
+  bool m_bGeometryValid = false;
+};
+
+/// \brief A trapezoid of ocean that a river's apron covers. Same form as plWaterRenderData::Cutout.
+struct PL_WATER_DLL plWaterOceanCutout
+{
+  PL_DECLARE_POD_TYPE();
+
+  plVec2 m_vCenter = plVec2::MakeZero();
+  plVec2 m_vDirection = plVec2(1.0f, 0.0f);
+  float m_fHalfLength = 0.0f;
+  float m_fStartHalfWidth = 0.0f;
+  float m_fEndHalfWidth = 0.0f;
+};
+
 struct PL_WATER_DLL plWaterJunctionDescriptor
 {
   plGameObjectHandle m_hOwnerObject;
@@ -80,62 +108,55 @@ struct PL_WATER_DLL plWaterJunctionDescriptor
   plUInt8 m_uiAttachmentB = 0;
   float m_fBlendDistance = 5.0f;
   float m_fHeightTolerance = 0.25f;
+  float m_fFrontBreakup = 0.5f; ///< How ragged the front between the two waters is drawn, 0..1.
 };
 
+/// \brief What became of a junction when its network was meshed. Read-only, for extraction, queries, tests and debug views.
 struct PL_WATER_DLL plWaterJunctionRenderSnapshot
 {
   plWaterJunctionDescriptor m_Descriptor;
-  /// Exact referenced bodies used by the generated patch. Primary is the river; secondary is the receiving
-  /// lake/ocean that owns extraction. Lake patches terminate on duplicated vertices from its shoreline mesh.
+  /// A junction that is meshed joins a river (primary) to a lake or an ocean (secondary). Lake to lake, lake to ocean
+  /// and river to river junctions have no mesh; queries still blend across them, and m_bValid is false.
   plWaterBodyId m_PrimaryBody;
   plWaterBodyId m_SecondaryBody;
-  plWaterProfileResourceDescriptor m_PrimaryProfile;
-  plWaterProfileResourceDescriptor m_SecondaryProfile;
   plEnum<plWaterBodyType> m_SecondaryType = plWaterBodyType::Lake;
-  plMeshBufferResourceHandle m_hSurfaceMesh;
-  plMeshBufferResourceHandle m_hVolumeMesh;
+  bool m_bRiverEnd = true; ///< The river's end is joined (water flows into the receiver), or its start.
+  bool m_bValid = false;
+  plUInt32 m_uiRevision = 0;
+  plString m_sProblem; ///< Why the junction was left out of the mesh, when it was.
+
+  /// The mouth line: the two bank points on the receiver's shore (at the river's end for an ocean) and the direction
+  /// from the river into the receiver.
+  plVec3 m_vMouthLeft = plVec3::MakeZero();
+  plVec3 m_vMouthRight = plVec3::MakeZero();
+  plVec2 m_vInward = plVec2(1.0f, 0.0f);
+
+  /// Lake joins: vertices on the mouth line that the river's mesh and the lake's mesh both hold, per LOD, and the
+  /// largest difference between a vertex of one and its twin in the other over all LODs (position and wave
+  /// attenuation). Zero when the meshes conform, which they do by construction.
+  plUInt32 m_uiSharedVertexCount[3] = {0, 0, 0};
+  float m_fMaximumSeamError = 0.0f;
+
+  /// How far the two waters mix on either side of the mouth line, and the receiver's share on the line itself.
+  float m_fMixLengthRiver = 0.0f;
+  float m_fMixLengthReceiver = 0.0f;
+  float m_fMouthWeight = 0.5f;
+
+  /// Ocean joins: the inside of the river's apron, which the ocean does not need to draw. See plWaterRenderData::Cutout.
   plVec2 m_vCutoutCenter = plVec2::MakeZero();
   plVec2 m_vCutoutDirection = plVec2(1.0f, 0.0f);
   float m_fCutoutHalfLength = 0.0f;
   float m_fStartHalfWidth = 0.0f;
   float m_fEndHalfWidth = 0.0f;
-  /// Insets the river cutout at its welded edge so the patch retains a narrow, crack-free overlap with the river.
-  float m_fCutoutMargin = 0.0f;
-  /// Foam intensity where river outflow and incoming waves collide (0 when either side has no energy).
-  float m_fMouthFoamStrength = 0.0f;
-  /// Spectrum cascades of the secondary body, so the patch can reproduce its GPU displacement at the seam.
-  plUInt32 m_uiSecondaryGpuCascadeCount = 0;
-  plUInt32 m_uiSurfacePrimitiveCount = 0;
-  plUInt32 m_uiVolumePrimitiveCount = 0;
-  plUInt32 m_uiRevision = 0;
-  bool m_bValid = false;
-  /// Localized current carried into the receiving lake. The field axis always points from the shoreline into
-  /// the lake; DirectionSign is +1 for river inflow and -1 for lake outflow through a river-start junction.
-  /// Kept at the end so POD-only flow metadata does not disturb the legacy snapshot member layout.
+
+  /// The current that queries see in the receiver. The field axis points from the mouth line into the receiver;
+  /// DirectionSign is +1 where the river flows in and -1 where the receiver drains into the river.
   plVec2 m_vFlowFieldOrigin = plVec2::MakeZero();
   plVec2 m_vFlowFieldDirection = plVec2(1.0f, 0.0f);
   float m_fFlowFieldLength = 0.0f;
   float m_fFlowFieldHalfWidth = 0.0f;
   float m_fFlowFieldSpeed = 0.0f;
   float m_fFlowFieldDirectionSign = 1.0f;
-  /// Validation/debug metadata for the exact lake shoreline zipper. Zero for ocean junctions.
-  plVec2 m_vStitchedLakeLeft = plVec2::MakeZero();
-  plVec2 m_vStitchedLakeRight = plVec2::MakeZero();
-  plUInt32 m_uiStitchedRiverVertexCount = 0;
-  plUInt32 m_uiStitchedLakeVertexCount = 0;
-  float m_fMaximumLakeSeamError = 0.0f;
-  /// Merged junction remesh: one continuous mesh containing the primary river (genuinely cut at the weld
-  /// row) plus the transition patch and the duplicated lake shoreline. When set, the PRIMARY body submits
-  /// this mesh instead of its own finite LODs, no analytic cutout is applied and the separate patch draw is
-  /// suppressed - the former river/patch overlap seam cannot exist. Only produced while the river
-  /// participates in no other junction (one secondary profile per draw).
-  plMeshBufferResourceHandle m_hMergedSurfaceMesh;
-  plMeshBufferResourceHandle m_hMergedVolumeMesh;
-  plUInt32 m_uiMergedSurfacePrimitiveCount = 0;
-  plUInt32 m_uiMergedVolumePrimitiveCount = 0;
-  bool m_bMergedIntoPrimary = false;
-  /// Length of the final transition strip whose vertices are already 100% receiving-lake material.
-  float m_fLakeMaterialConvergenceDistance = 0.0f;
 };
 
 struct PL_WATER_DLL plWaterExclusionDescriptor
@@ -165,6 +186,10 @@ public:
   virtual plTime GetFixedSimulationStep() const override;
   virtual void AddInteraction(plWaterInteraction interaction) override;
   virtual plUInt64 CopyInteractionsSince(plUInt64 uiAfterSequence, plDynamicArray<plWaterInteraction>& out_interactions) const override;
+
+  /// \brief Starts the water's clock again at zero and drops what interactions there are. Waves are a function of
+  /// this clock, so a test that compares pictures calls it to make a scene look the same whatever ran before it.
+  void ResetSimulationClock();
 
   /// \brief Debug-display only: the frame-data extractor of a primary (main/editor) view publishes the center
   /// of the currently valid 100 m interaction window here so Water.Debug.ShowInteractions can draw it.
@@ -196,7 +221,14 @@ public:
   /// spectrum slot of an entry is left at zero and its cascade count holds what the profile asks for; the surface
   /// pass replaces both with what its simulation gave the profile.
   plUInt32 FillGpuProfileTable(plArrayPtr<plWaterGpuProfile> out_entries) const;
+  /// \brief Every junction, meshed or not. A junction with m_bValid false and a problem text was left out of the mesh.
   void CopyJunctionRenderSnapshots(plDynamicArray<plWaterJunctionRenderSnapshot>& out_snapshots) const;
+
+  /// \brief What extraction needs of a body, without the copy of its vertices that a full snapshot holds.
+  bool TryGetBodyRenderInfo(plWaterBodyId bodyId, plWaterBodyRenderInfo& out_info) const;
+
+  /// \brief Ocean joins: the insides of the aprons of the rivers that reach this ocean, for the ocean to leave out.
+  void CopyOceanCutouts(plWaterBodyId oceanId, plDynamicArray<plWaterOceanCutout>& out_cutouts) const;
 
 private:
   struct BodySlot
@@ -221,8 +253,17 @@ private:
 
   void Update(const plWorldModule::UpdateContext& context);
   void PrepareBody(BodySlot& slot, const plWaterBodyDescriptor& descriptor);
-  void PrepareJunction(JunctionSlot& slot);
-  void PrepareOtherJunctions(const JunctionSlot* pExcept);
+
+  /// Rivers and lakes that junctions join are meshed together, as one network (plWaterNetworkMesher). These rebuild
+  /// the networks that the given bodies are in: their meshes at every LOD, their volumes, and what became of each junction.
+  void RebuildNetworks(plArrayPtr<const plUInt32> seedBodies);
+  void RebuildNetworksAround(plUInt32 uiBody);
+  void RebuildNetwork(plArrayPtr<const plUInt32> networkBodies, plArrayPtr<const plUInt32> networkJunctions);
+  void CollectNetwork(plUInt32 uiSeedBody, plDynamicArray<plUInt32>& out_bodies, plDynamicArray<plUInt32>& out_junctions) const;
+  void CollectJunctionNeighbours(plUInt32 uiBody, plDynamicArray<plUInt32>& out_bodies) const;
+  /// True for a junction between a river and a lake or ocean, which is what the mesher joins.
+  bool ResolveJoin(const JunctionSlot& junction, plUInt32& out_uiRiver, plUInt32& out_uiReceiver, bool& out_bRiverEnd) const;
+  static void ResetJunctionRenderData(JunctionSlot& junction);
   bool IsBodyIdValid(plWaterBodyId bodyId) const;
   bool SampleBody(const BodySlot& slot, const plWaterSurfaceQuery& query, plUInt64 uiSimulationTick, plWaterSurfaceResult& out_result) const;
   bool IsExcluded(const BodySlot& slot, const plWaterSurfaceQuery& query) const;

@@ -20,7 +20,8 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
 
 plCVarInt cvar_WaterDebugJunctionPatches("Water.Debug.JunctionPatches", 0, plCVarFlags::Default,
-  "Visualizes junction blend patches: 0 = off, 1 = blend gradient (occlusion clip active), 2 = blend gradient bypassing the occlusion clip.");
+  "Shows one term of the water shading instead of the picture: 0 = off, 1 = profile weights on rivers and lakes (what Water.Debug.Stitch shows), 3 and up = shading terms; see the end of WaterSurfaceModern.plShader.");
+extern plCVarBool cvar_WaterDebugStitch;
 
 plCVarBool cvar_WaterDebugNoTessellation("Water.Debug.NoTessellation", false, plCVarFlags::Default,
   "Draws water without hull and domain stages on every tier. For finding out what tessellation costs.");
@@ -62,8 +63,7 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
     const plGALDeviceCapabilities& capabilities = plGALDevice::GetDefaultDevice()->GetCapabilities();
     const bool bTessellationSupported = capabilities.m_bShaderStageSupported[plGALShaderStage::HullShader] &&
                                         capabilities.m_bShaderStageSupported[plGALShaderStage::DomainShader];
-    const bool bSurfaceGeometry = pRenderData->m_uiGeometryType == 0u || pRenderData->m_uiGeometryType == 1u ||
-                                  pRenderData->m_uiGeometryType == 2u || pRenderData->m_uiGeometryType == 5u;
+    const bool bSurfaceGeometry = pRenderData->m_uiGeometryType != plWaterRenderData::GeometryVolume;
     const bool bUseTessellation = pQuality != nullptr && pQuality->m_Tier != plWaterQualityTier::Low &&
                                   bTessellationSupported && bSurfaceGeometry && !cvar_WaterDebugNoTessellation;
 
@@ -121,43 +121,36 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
       vInteractionWindowParams = pWaterPass->GetInteractionWindowParams();
     }
 
-    // Everything that belongs to a profile comes from the profile table. A draw only says which entries it uses.
-    const plUInt32 uiProfileA = pRenderData->m_uiProfileIndex;
-    const plUInt32 uiProfileB = pRenderData->m_uiSecondaryProfileIndex != plInvalidIndex ? pRenderData->m_uiSecondaryProfileIndex : uiProfileA;
+    // Everything that belongs to a profile comes from the profile table. A draw only names its own entry; the
+    // vertices of a river or lake name the pairs they blend.
+    const plUInt32 uiProfile = pRenderData->m_uiProfileIndex;
 
     plWaterDrawConstants constants;
     constants.PatchOriginAndBaseHeight = plVec4(pRenderData->m_vPatchOrigin.x, pRenderData->m_vPatchOrigin.y, pRenderData->m_vPatchOrigin.z, pRenderData->m_fBaseHeight);
     constants.PatchAxisUAndExtent = plVec4(pRenderData->m_vPatchAxisU.x, pRenderData->m_vPatchAxisU.y, pRenderData->m_vPatchAxisU.z, pRenderData->m_fExtentU);
     constants.PatchAxisVAndExtent = plVec4(pRenderData->m_vPatchAxisV.x, pRenderData->m_vPatchAxisV.y, pRenderData->m_vPatchAxisV.z, pRenderData->m_fExtentV);
     constants.SurfaceParams = plVec4(pRenderData->m_fSimulationTime, 0.0f, 0.0f, 0.0f);
-    constants.PatchParams = plVec4U32(uiCellsPerSide, uiSpectrumLayerCount, static_cast<plUInt32>(cvar_WaterDebugJunctionPatches), pRenderData->m_uiGeometryType);
+    // Water.Debug.Stitch shows the profile weights, which is view 1.
+    const plUInt32 uiDebugMode = cvar_WaterDebugStitch ? 1u : static_cast<plUInt32>(plMath::Max(cvar_WaterDebugJunctionPatches.GetValue(), 0));
+    constants.PatchParams = plVec4U32(uiCellsPerSide, uiSpectrumLayerCount, uiDebugMode, pRenderData->m_uiGeometryType);
     const plUInt32 uiActiveUnderwaterBodyId = pWaterPass != nullptr ? pWaterPass->GetActiveUnderwaterBodyId() : plInvalidIndex;
-    constants.VolumeFilterParams = plVec4U32(pRenderData->m_uiBodyId, pRenderData->m_uiSecondaryBodyId,
+    constants.VolumeFilterParams = plVec4U32(pRenderData->m_uiBodyId, plInvalidIndex,
       uiActiveUnderwaterBodyId, uiActiveUnderwaterBodyId != plInvalidIndex ? 1u : 0u);
-    constants.ProfileParams = plVec4U32(uiProfileA, uiProfileB, uiProfileCount, 0u);
+    const plUInt32 uiSeams = (pRenderData->m_uiInnerSeamMask & 0xFu) | ((pRenderData->m_uiOuterSeamMask & 0xFu) << 4) | (static_cast<plUInt32>(pRenderData->m_uiLod) << 8);
+    constants.ProfileParams = plVec4U32(uiProfile, uiProfile, uiProfileCount, uiSeams);
 
     plWaterJunctionConstants* junctionConstants = plRenderContext::GetConstantBufferData<plWaterJunctionConstants>(m_hJunctionConstants);
-    junctionConstants->JunctionCutout0 = plVec4(pRenderData->m_JunctionCutouts[0].m_vCenter.x, pRenderData->m_JunctionCutouts[0].m_vCenter.y,
-      pRenderData->m_JunctionCutouts[0].m_vDirection.x, pRenderData->m_JunctionCutouts[0].m_vDirection.y);
-    junctionConstants->JunctionCutout1 = plVec4(pRenderData->m_JunctionCutouts[0].m_fHalfLength, pRenderData->m_JunctionCutouts[0].m_fStartHalfWidth,
-      pRenderData->m_JunctionCutouts[0].m_fEndHalfWidth, pRenderData->m_JunctionCutouts[0].m_fEnabled);
-    junctionConstants->JunctionCutout2 = plVec4(pRenderData->m_JunctionCutouts[1].m_vCenter.x, pRenderData->m_JunctionCutouts[1].m_vCenter.y,
-      pRenderData->m_JunctionCutouts[1].m_vDirection.x, pRenderData->m_JunctionCutouts[1].m_vDirection.y);
-    junctionConstants->JunctionCutout3 = plVec4(pRenderData->m_JunctionCutouts[1].m_fHalfLength, pRenderData->m_JunctionCutouts[1].m_fStartHalfWidth,
-      pRenderData->m_JunctionCutouts[1].m_fEndHalfWidth, pRenderData->m_JunctionCutouts[1].m_fEnabled);
-    junctionConstants->JunctionFlow0 = plVec4(pRenderData->m_JunctionFlows[0].m_vOrigin.x, pRenderData->m_JunctionFlows[0].m_vOrigin.y,
-      pRenderData->m_JunctionFlows[0].m_vDirection.x, pRenderData->m_JunctionFlows[0].m_vDirection.y);
-    junctionConstants->JunctionFlow1 = plVec4(pRenderData->m_JunctionFlows[0].m_fLength, pRenderData->m_JunctionFlows[0].m_fHalfWidth,
-      pRenderData->m_JunctionFlows[0].m_fSpeed, pRenderData->m_JunctionFlows[0].m_fDirectionSign);
-    junctionConstants->JunctionFlow2 = plVec4(pRenderData->m_JunctionFlows[1].m_vOrigin.x, pRenderData->m_JunctionFlows[1].m_vOrigin.y,
-      pRenderData->m_JunctionFlows[1].m_vDirection.x, pRenderData->m_JunctionFlows[1].m_vDirection.y);
-    junctionConstants->JunctionFlow3 = plVec4(pRenderData->m_JunctionFlows[1].m_fLength, pRenderData->m_JunctionFlows[1].m_fHalfWidth,
-      pRenderData->m_JunctionFlows[1].m_fSpeed, pRenderData->m_JunctionFlows[1].m_fDirectionSign);
+    junctionConstants->JunctionCutout0 = plVec4(pRenderData->m_Cutouts[0].m_vCenter.x, pRenderData->m_Cutouts[0].m_vCenter.y,
+      pRenderData->m_Cutouts[0].m_vDirection.x, pRenderData->m_Cutouts[0].m_vDirection.y);
+    junctionConstants->JunctionCutout1 = plVec4(pRenderData->m_Cutouts[0].m_fHalfLength, pRenderData->m_Cutouts[0].m_fStartHalfWidth,
+      pRenderData->m_Cutouts[0].m_fEndHalfWidth, pRenderData->m_Cutouts[0].m_fEnabled);
+    junctionConstants->JunctionCutout2 = plVec4(pRenderData->m_Cutouts[1].m_vCenter.x, pRenderData->m_Cutouts[1].m_vCenter.y,
+      pRenderData->m_Cutouts[1].m_vDirection.x, pRenderData->m_Cutouts[1].m_vDirection.y);
+    junctionConstants->JunctionCutout3 = plVec4(pRenderData->m_Cutouts[1].m_fHalfLength, pRenderData->m_Cutouts[1].m_fStartHalfWidth,
+      pRenderData->m_Cutouts[1].m_fEndHalfWidth, pRenderData->m_Cutouts[1].m_fEnabled);
     junctionConstants->MainLightDirection = plVec4(vMainLightDirection.x, vMainLightDirection.y, vMainLightDirection.z, 0.0f);
     junctionConstants->MainLightColorIntensity = plVec4(vMainLightColorIntensity.x, vMainLightColorIntensity.y, vMainLightColorIntensity.z, 0.0f);
     junctionConstants->InteractionWindowParams = vInteractionWindowParams;
-    junctionConstants->JunctionSpillParams = plVec4(0.0f, 0.0f, pRenderData->m_fMouthFoamStrength, 0.0f);
-    junctionConstants->JunctionMaterialParams = plVec4(0.0f, 0.0f, pRenderData->m_fJunctionMaterialMixStrength, static_cast<float>(pRenderData->m_uiJunctionMaterialFlowSlot));
     junctionConstants->WaterQualityParams = plVec4(
       pWaterPass != nullptr ? static_cast<float>(pWaterPass->GetQualitySettings().m_uiScreenSpaceReflectionSteps) : 0.0f, 0.0f, 0.0f, 0.0f);
     float fMaximumTessellation = 1.0f;
@@ -190,9 +183,7 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
 
     pContext->SetPushConstants("plWaterDrawConstants", constants);
     bindGroup.BindTexture("WaterNormalTexture", pRenderData->m_hNormalTexture, plResourceAcquireMode::AllowLoadingFallback);
-    bindGroup.BindTexture("WaterNormalTextureSecondary", pRenderData->m_hSecondaryNormalTexture, plResourceAcquireMode::AllowLoadingFallback);
     bindGroup.BindTexture("WaterFoamTexture", pRenderData->m_hFoamTexture, plResourceAcquireMode::AllowLoadingFallback);
-    bindGroup.BindTexture("WaterFoamTextureSecondary", pRenderData->m_hSecondaryFoamTexture, plResourceAcquireMode::AllowLoadingFallback);
     bindGroup.BindBuffer("plWaterJunctionConstants", m_hJunctionConstants);
 
     const plUInt32 uiPrimitiveCount = pRenderData->m_hFiniteMesh.IsValid()

@@ -362,6 +362,15 @@ plResult plWaterGeometry::TriangulateLake(plArrayPtr<const plVec3> boundary,
     }
   }
 
+  return TriangulateLakePolygon(cleaned, out_vertices, out_indices, fEpsilon, settings);
+}
+
+plResult plWaterGeometry::TriangulateLakePolygon(plArrayPtr<const plVec3> cleaned, plDynamicArray<plWaterGeometryVertex>& out_vertices,
+  plDynamicArray<plUInt32>& out_indices, float fEpsilon, const plWaterFiniteMeshSettings& settings)
+{
+  out_vertices.Clear();
+  out_indices.Clear();
+
   if (cleaned.GetCount() < 3)
     return PL_FAILURE;
 

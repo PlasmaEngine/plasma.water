@@ -49,7 +49,6 @@ WireFrame = true
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 #include <Shaders/Water/WaterSurfaceVertex.h>
 
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
@@ -137,7 +136,6 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 #include <Shaders/Common/GlobalConstants.h>
 #include <Shaders/Materials/MaterialInterpolator.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 
 struct WaterTessellationFactors
 {
@@ -172,16 +170,7 @@ float WaterEdgeTessellationFactor(VS_OUT a, VS_OUT b)
       factor = max(factor, TessellationParams.z);
   }
 
-  // Current ridges are true displacement, so keep enough local geometry to resolve them even when a large
-  // regular lake triangle spans the mouth. The uniform branch and two analytic fields are substantially cheaper
-  // than tessellating the entire lake to this density.
-  if (distanceToCamera < 64.0)
-  {
-    const float flowInfluence = EvaluateWaterJunctionFlow(midpoint.xy).z;
-    factor = max(factor, ceil(lerp(1.0, min(maxFactor, 4.0), flowInfluence)));
-  }
-
-  // Integral, edge-derived factors match across independently drawn river, junction, and receiving-body edges.
+  // Whole-number factors taken from the edge alone: the two parts of a network that share an edge tessellate it alike.
   return clamp(factor, 1.0, maxFactor);
 }
 
@@ -225,7 +214,6 @@ VS_OUT main(InputPatch<VS_OUT, 3> patch, uint id : SV_OutputControlPointID)
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 #include <Shaders/Water/WaterSurfaceVertex.h>
 
 struct WaterTessellationFactors
@@ -295,15 +283,14 @@ VS_OUT main(WaterTessellationFactors factors, OutputPatch<VS_OUT, 3> patch,
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
-#include <Shaders/Water/WaterJunctionFlow.h>
 #include <Shaders/Water/WaterProfile.h>
 
 Texture2DArray WaterSceneColor BIND_GROUP(BG_RENDER_PASS);
 Texture2DArray WaterOpaqueDepth BIND_GROUP(BG_RENDER_PASS);
+// One detail normal and one foam texture per draw: the drawing body's. A blend with another profile samples the same
+// pair with that profile's scale and drift.
 Texture2D WaterNormalTexture BIND_GROUP(BG_DRAW_CALL);
-Texture2D WaterNormalTextureSecondary BIND_GROUP(BG_DRAW_CALL);
 Texture2D WaterFoamTexture BIND_GROUP(BG_DRAW_CALL);
-Texture2D WaterFoamTextureSecondary BIND_GROUP(BG_DRAW_CALL);
 
 float3 ApplyWaterNormalDetail(float3 baseNormal, float3 worldPosition, plWaterGpuProfile profileA, plWaterGpuProfile profileB,
   float profileBlend, float2 primaryFlow, float2 secondaryFlow)
@@ -330,8 +317,8 @@ float3 ApplyWaterNormalDetail(float3 baseNormal, float3 worldPosition, plWaterGp
     // at profileBlend 1 while allowing the river motion to continue visibly into (or out of) the basin.
     const float2 secondaryUv0 = worldPosition.xy * (0.045 * secondaryDetailScale) + secondaryFlow * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
     const float2 secondaryUv1 = worldPosition.yx * (0.083 * secondaryDetailScale) - secondaryFlow.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
-    const float2 secondaryDetail0 = WaterNormalTextureSecondary.Sample(LinearSampler, secondaryUv0).xy * 2.0 - 1.0;
-    const float2 secondaryDetail1 = WaterNormalTextureSecondary.Sample(LinearSampler, secondaryUv1).xy * 2.0 - 1.0;
+    const float2 secondaryDetail0 = WaterNormalTexture.Sample(LinearSampler, secondaryUv0).xy * 2.0 - 1.0;
+    const float2 secondaryDetail1 = WaterNormalTexture.Sample(LinearSampler, secondaryUv1).xy * 2.0 - 1.0;
     secondaryDetail = (secondaryDetail0 + secondaryDetail1 * 0.55) * secondaryDetailParams.y;
   }
 
@@ -373,8 +360,8 @@ float SampleSecondaryWaterFoamBreakup(plWaterGpuProfile profile, float3 worldPos
   const float2 secondaryPosition = worldPosition.xy + secondaryFlow * simulationTime + profile.WindAndFlow.xy * simulationTime * 0.15;
   if (profile.FoamMaterialParams.z > 0.5)
   {
-    const float secondary0 = WaterFoamTextureSecondary.Sample(LinearSampler, secondaryPosition * secondaryScale).r;
-    const float secondary1 = WaterFoamTextureSecondary.Sample(LinearSampler,
+    const float secondary0 = WaterFoamTexture.Sample(LinearSampler, secondaryPosition * secondaryScale).r;
+    const float secondary1 = WaterFoamTexture.Sample(LinearSampler,
       secondaryPosition.yx * (secondaryScale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
     return saturate(secondary0 * 0.62 + secondary1 * 0.38);
   }
@@ -411,11 +398,36 @@ bool InsideJunctionCutout(float2 baseWorldXY, float4 cutout, float4 dimensions)
   return t >= 0.0 && t <= 1.0 && abs(dot(delta, perpendicular)) <= halfWidth;
 }
 
+// An ocean patch leaves out the inside of a river's apron, which is drawn after it and covers the same water.
 void RejectJunctionOverlap(float2 baseWorldXY)
 {
+  if (GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w != 0u)
+    return;
   if (InsideJunctionCutout(baseWorldXY, JunctionCutout0, JunctionCutout1) ||
       InsideJunctionCutout(baseWorldXY, JunctionCutout2, JunctionCutout3))
     discard;
+}
+
+// How a profile's detail normals and foam drift: a river's along the mesh's flow direction, a lake's with the pair
+// of scalars its look was tuned against, an ocean's not at all (its wind term is added where the textures are sampled).
+float2 EvaluateWaterDetailVelocity(plWaterGpuProfile profile, float2 flowDirection)
+{
+  return profile.SpectrumParams.w > 0.5 ? flowDirection * (profile.WindAndFlow.z * profile.WindAndFlow.w) : profile.WindAndFlow.zw;
+}
+
+// Where a current runs into waves, the water breaks. How hard depends on both: no current or no waves, no churn.
+float EvaluateWaterMouthFoam(plWaterGpuProfile profileA, plWaterGpuProfile profileB, float profileBlend)
+{
+  const float currentA = profileA.SpectrumParams.w > 0.5 ? abs(profileA.WindAndFlow.z * profileA.WindAndFlow.w) : 0.0;
+  const float currentB = profileB.SpectrumParams.w > 0.5 ? abs(profileB.WindAndFlow.z * profileB.WindAndFlow.w) : 0.0;
+  const float wavesA = profileA.SpectrumParams.w > 0.5 ? 0.0 : max(profileA.WaveParams.x, 0.0) * max(profileA.WaveParams.z, 0.1);
+  const float wavesB = profileB.SpectrumParams.w > 0.5 ? 0.0 : max(profileB.WaveParams.x, 0.0) * max(profileB.WaveParams.z, 0.1);
+  const float currentPush = max(currentA, currentB);
+  const float wavePush = max(wavesA, wavesB);
+  const float pushback = wavePush / max(wavePush + currentPush, 1.0e-4);
+  const float contest = 4.0 * pushback * (1.0 - pushback);
+  const float front = saturate(4.0 * profileBlend * (1.0 - profileBlend));
+  return contest * min((currentPush + wavePush) * 0.25, 1.0) * front * front;
 }
 
 float LoadWaterOpaqueDepth(float2 pixelPosition, uint eyeIndex)
@@ -589,12 +601,10 @@ float main(PS_IN input) : SV_Target0
   s_ActiveCameraEyeIndex = input.RenderTargetArrayIndex;
 #endif
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 1u || geometryType == 2u || geometryType == 5u)
+  if (geometryType == 1u)
     discard;
   const uint4 volumeFilter = GET_PUSH_CONSTANT(plWaterDrawConstants, VolumeFilterParams);
-  const bool belongsToActiveBody = volumeFilter.z == volumeFilter.x ||
-                                   (geometryType == 6u && volumeFilter.z == volumeFilter.y);
-  if (volumeFilter.w == 0u || !belongsToActiveBody)
+  if (volumeFilter.w == 0u || volumeFilter.z != volumeFilter.x)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
   return LinearizeZBufferDepth(input.Position.z);
@@ -611,7 +621,7 @@ struct WaterCausticFieldOutput
 WaterCausticFieldOutput main(PS_IN input)
 {
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 3u || geometryType == 4u || geometryType == 6u)
+  if (geometryType == 3u)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
 
@@ -640,7 +650,7 @@ float main(PS_IN input) : SV_Target0
 #endif
   const uint eyeIndex = s_ActiveCameraEyeIndex;
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 3u || geometryType == 4u || geometryType == 6u)
+  if (geometryType == 3u)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
   float surfaceLinearDepth;
@@ -659,7 +669,7 @@ float4 main(PS_IN input) : SV_Target0
 #endif
   const uint eyeIndex = s_ActiveCameraEyeIndex;
   const uint geometryType = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).w;
-  if (geometryType == 3u || geometryType == 4u || geometryType == 6u)
+  if (geometryType == 3u)
     discard;
   RejectJunctionOverlap(input.BaseWorldXY);
 
@@ -674,28 +684,22 @@ float4 main(PS_IN input) : SV_Target0
   const plWaterGpuProfile profileA = LoadWaterProfile(profileIndexA);
   const plWaterGpuProfile profileB = LoadWaterProfile(profileIndexB);
 
-  if (geometryType == 5u)
+#if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
+  [branch]
+  if (profileIndexA != profileIndexB && profileBlend > 0.0 && profileBlend < 1.0)
   {
-    // Keep exact endpoint geometry while breaking up the artificial straight cross-profile boundary.
+    // The mix of two waters is not a ramp across the mouth: its front is ragged. The breakup is a function of the
+    // position and the weight alone, so the river's side and the receiver's side of a mouth line agree on it, and it
+    // is nothing where either water is pure. How ragged is the junction's Front Breakup, carried in the vertex alpha.
+    const float frontTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
+    const float2 p = input.BaseWorldXY;
+    const float frontNoise = sin(dot(p, float2(2.1, 1.3)) + frontTime * 0.31) * sin(dot(p, float2(-1.7, 2.9)) - frontTime * 0.23) * 0.6 +
+                             sin(dot(p, float2(5.3, -4.1)) - frontTime * 0.47) * sin(dot(p, float2(3.9, 6.7)) + frontTime * 0.41) * 0.4;
     const float blendInterior = 4.0 * profileBlend * (1.0 - profileBlend);
-    const float blendNoise = sin(input.WorldPosition.x * 0.071) * sin(input.WorldPosition.y * 0.113) * 0.5;
-    profileBlend = smoothstep(0.04, 0.96, saturate(profileBlend + blendNoise * 0.12 * blendInterior));
+    profileBlend = saturate(profileBlend + frontNoise * saturate(input.Color0.a) * 0.45 * blendInterior);
   }
-
-  // Geometry must become 100% lake before the stitched edge, but its material does not: inflowing river water
-  // continues as an analytic tint plume on the lake's own draw. The junction draw is river-primary/lake-secondary,
-  // while the lake draw reverses those profiles. Complementary weights make both draws evaluate the exact same
-  // color and optical material at every shoreline point without overlapping geometry.
-  float materialProfileBlend = profileBlend;
-  const float materialMixStrength = saturate(JunctionMaterialParams.z);
-  if (materialMixStrength > 0.0)
-  {
-    const float materialInfluence = EvaluateWaterJunctionMaterialInfluence(input.BaseWorldXY, JunctionMaterialParams.w);
-    if (geometryType == 5u || geometryType == 6u)
-      materialProfileBlend = profileBlend * (1.0 - materialMixStrength * materialInfluence);
-    else if (geometryType == 2u || geometryType == 4u)
-      materialProfileBlend = materialMixStrength * materialInfluence;
-  }
+#endif
+  const float materialProfileBlend = profileBlend;
 
 #if RENDER_PASS == RENDER_PASS_WIREFRAME
   if (RenderPass == WIREFRAME_RENDER_PASS_MONOCHROME)
@@ -704,13 +708,17 @@ float4 main(PS_IN input) : SV_Target0
 #endif
 
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE && RENDER_PASS == RENDER_PASS_FORWARD
-  // Water.Debug.JunctionPatches: visualize the junction blend gradient (river end = magenta, secondary
-  // end = green). Mode 2 additionally bypasses depth occlusion via the vertex shader. Modes 3+ fall
-  // through to the shading-term visualizations at the end of the shader.
+  // Water.Debug.Stitch (or Water.Debug.JunctionPatches 1): the profile weights on rivers and lakes. A body's own water
+  // is dark blue; where two waters mix, the first of the pair is magenta and the second green. Modes 3+ fall through
+  // to the shading-term views at the end of the shader.
   {
     const uint debugMode = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).z;
-    if ((debugMode == 1u || debugMode == 2u) && geometryType == 5u)
-      return float4(lerp(float3(1.0, 0.0, 1.0), float3(0.0, 1.0, 0.0), saturate(input.Color0.r)), 1.0);
+    if (debugMode == 1u)
+    {
+      if (profileIndexA == profileIndexB)
+        return float4(0.02, 0.05, 0.25, 1.0);
+      return float4(lerp(float3(1.0, 0.0, 1.0), float3(0.0, 1.0, 0.0), profileBlend), 1.0);
+    }
   }
 #endif
 
@@ -722,35 +730,13 @@ float4 main(PS_IN input) : SV_Target0
 
   const float2 uv = input.Position.xy * ViewportSize.zw;
 
-  // FlowAndJunctionBlend.xy packs the SCALAR (flowSpeed, flowScale) pair, never a direction. Rivers and
-  // junction patches carry the authored per-vertex flow direction in the tangent - their detail normals and
-  // foam advect along the actual current. Other bodies keep the legacy scalar-pair drift (oceans have zero
-  // scalars, lake visuals and test baselines were calibrated against it).
-  const float2 flowScalars = profileA.WindAndFlow.zw;
-  float2 primaryFlowVelocity = flowScalars;
-  float2 secondaryFlowVelocity = 0.0;
-  const float3 junctionFlow = (geometryType == 2u || geometryType == 4u || geometryType == 5u || geometryType == 6u)
-                                ? EvaluateWaterJunctionFlow(input.BaseWorldXY)
-                                : 0.0;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
-  if (geometryType == 1u || geometryType == 3u || geometryType == 5u || geometryType == 6u)
-  {
-    const float2 flowTangent = dot(input.Tangent.xy, input.Tangent.xy) > 1.0e-10 ? normalize(input.Tangent.xy) : float2(1.0, 0.0);
-    primaryFlowVelocity = flowTangent * (flowScalars.x * flowScalars.y);
-  }
-  if (geometryType == 2u || geometryType == 4u)
-  {
-    primaryFlowVelocity = flowScalars * (1.0 - junctionFlow.z) + junctionFlow.xy;
-    if (materialMixStrength > 0.0)
-      secondaryFlowVelocity = junctionFlow.xy;
-  }
-  else if (geometryType == 5u || geometryType == 6u)
-  {
-    // Match the receiving body's ordinary draw exactly at profileBlend 1. Dropping its baseline drift here
-    // made the same normal/foam textures slide at different velocities on opposite sides of the stitched edge.
-    secondaryFlowVelocity = profileB.WindAndFlow.zw * (1.0 - junctionFlow.z) + junctionFlow.xy;
-  }
+  const float2 flowTangent = dot(input.Tangent.xy, input.Tangent.xy) > 1.0e-10 ? normalize(input.Tangent.xy) : float2(1.0, 0.0);
+#else
+  const float2 flowTangent = float2(1.0, 0.0);
 #endif
+  const float2 primaryFlowVelocity = EvaluateWaterDetailVelocity(profileA, flowTangent);
+  const float2 secondaryFlowVelocity = EvaluateWaterDetailVelocity(profileB, flowTangent);
 
   // Interaction data is deliberately absent from the pixel stage. Its only visible contribution is the
   // displaced vertex position and coherent vertex normal produced above; no atlas-shaped shading is painted
@@ -841,11 +827,9 @@ float4 main(PS_IN input) : SV_Target0
   // breaks into foam. The strength is precomputed from the two bodies' energies (zero when either side is
   // calm) and the band peaks at the blend front, which the energy balance has already positioned.
   float mouthFoam = 0.0;
-  if (geometryType == 5u)
-  {
-    const float front = saturate(4.0 * profileBlend * (1.0 - profileBlend));
-    mouthFoam = JunctionSpillParams.z * front * front;
-  }
+  [branch]
+  if (profileIndexA != profileIndexB)
+    mouthFoam = EvaluateWaterMouthFoam(profileA, profileB, profileBlend);
   const float breakingFoam = max(crestFoam, spectralFoam);
   const float unbrokenBaseFoam = max(max(shoreFoam, breakingFoam), mouthFoam);
   float baseFoam = 0.0;

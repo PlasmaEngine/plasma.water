@@ -564,8 +564,8 @@ void plWaterSurfacePass::RefreshGpuSpectrumProfiles()
   {
     for (auto it = waterBatches.GetBatch(uiBatch).GetIterator<plWaterRenderData>(); it.IsValid(); ++it)
     {
-      m_bHasTransmittedCausticSources |= it->m_fUnderwaterCaustics > 0.0f || it->m_fSecondaryUnderwaterCaustics > 0.0f;
-      m_bHasReflectedCausticSources |= it->m_fReflectedCaustics > 0.0f || it->m_fSecondaryReflectedCaustics > 0.0f;
+      m_bHasTransmittedCausticSources |= it->m_fUnderwaterCaustics > 0.0f;
+      m_bHasReflectedCausticSources |= it->m_fReflectedCaustics > 0.0f;
 
       if (!m_bSimulationInitialized || it->m_uiGpuCascadeCount == 0 ||
           registeredProfiles.GetCount() >= plWaterGpuSimulation::MaxSpectrumProfiles)

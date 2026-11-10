@@ -223,7 +223,7 @@ namespace
     }
     else
     {
-      PL_TEST_FAILURE("CVar not found", "{}", szName);
+      PL_TEST_FAILURE("CVar not found", "%s", szName);
     }
   }
 } // namespace
@@ -468,6 +468,8 @@ plResult plWaterGalleryApplication::SetupScene(Scene scene, plUInt32 uiVariant)
   m_pWorld->Clear();
   m_pWorld->GetRandomNumberGenerator().Initialize(0x57415445u);
   m_pWorld->GetClock().Reset(false);
+  // Waves are a function of the water's own clock. Starting it again makes a scene look the same whatever ran before it.
+  m_pWorld->GetOrCreateModule<plWaterWorldModule>()->ResetSimulationClock();
 
   const plColor rock(0.22f, 0.21f, 0.20f);
   const plColor sand(0.62f, 0.54f, 0.40f);
@@ -615,6 +617,11 @@ plArrayPtr<const plWaterGalleryApplication::Shot> plWaterGalleryApplication::Get
     {"SeaMouth", plVec3(28.0f, -4.0f, 9.0f), plVec3(42.0f, 10.0f, 0.0f)},
     {"SeaMouthFromSea", plVec3(64.0f, 26.0f, 9.0f), plVec3(40.0f, 10.0f, 0.0f)},
     {"SeaMouthFromAbove", plVec3(40.0f, 9.0f, 40.0f), plVec3(41.0f, 10.0f, 0.0f)},
+    // Water.Debug.JunctionPatches 1, the stitch view: a body's own water is dark blue, and where two waters mix the
+    // first of the pair is magenta and the second green.
+    {"LakeMouth_Stitch", plVec3(-18.0f, -10.0f, 10.0f), plVec3(-28.0f, 0.0f, 3.0f), 1},
+    {"SeaMouthFromAbove_Stitch", plVec3(40.0f, 9.0f, 40.0f), plVec3(41.0f, 10.0f, 0.0f), 1},
+    {"Overview_Stitch", plVec3(-10.0f, -75.0f, 60.0f), plVec3(-4.0f, 4.0f, 0.0f), 1},
   };
   static const Shot s_Bend[] = {
     {"Overview", plVec3(0.0f, -34.0f, 26.0f), plVec3(0.0f, 0.0f, 0.0f)},
@@ -676,7 +683,12 @@ bool plWaterGalleryApplication::CheckSceneIsValid()
   {
     if (!junction.m_bValid)
     {
-      plLog::Error("Water gallery: the junction at ({}, {}, {}) is not valid", junction.m_Descriptor.m_vCenter.x, junction.m_Descriptor.m_vCenter.y, junction.m_Descriptor.m_vCenter.z);
+      plLog::Error("Water gallery: the junction at ({}, {}, {}) was left out of the mesh: {}", junction.m_Descriptor.m_vCenter.x, junction.m_Descriptor.m_vCenter.y, junction.m_Descriptor.m_vCenter.z, junction.m_sProblem);
+      bValid = false;
+    }
+    else if (junction.m_fMaximumSeamError > 0.0f)
+    {
+      plLog::Error("Water gallery: the junction at ({}, {}, {}) has a seam: the two meshes differ by {} on the mouth line", junction.m_Descriptor.m_vCenter.x, junction.m_Descriptor.m_vCenter.y, junction.m_Descriptor.m_vCenter.z, junction.m_fMaximumSeamError);
       bValid = false;
     }
   }
@@ -998,7 +1010,7 @@ plTestAppRun plGameEngineTestWaterGallery::RunMainPipelineDrawsWater()
     float fMean = 0.0f, fChanged = 0.0f;
     if (PL_TEST_BOOL(CompareImages(m_WithWater, m_WithoutInjections, fMean, fChanged)))
     {
-      PL_TEST_BOOL_MSG(fChanged > 0.2f, "Water must be visible through the main pipeline: only {}% of the pixels differ from the frame without injections (mean difference {})", fChanged * 100.0f, fMean);
+      PL_TEST_BOOL_MSG(fChanged > 0.2f, "Water must be visible through the main pipeline: only %.1f%% of the pixels differ from the frame without injections (mean difference %.4f)", fChanged * 100.0f, fMean);
     }
 
     SetCVarBool("Rendering.Pipeline.Injections", true);
@@ -1013,11 +1025,11 @@ plTestAppRun plGameEngineTestWaterGallery::RunMainPipelineDrawsWater()
   if (PL_TEST_BOOL(CompareImages(m_pOwnApplication->GetLastScreenshot(), m_WithoutInjections, fMean, fChanged)))
   {
     // Clouds and exposure drift a little between the two captures; a lost frame would differ everywhere.
-    PL_TEST_BOOL_MSG(fChanged < 0.05f, "With a failing surface pass the frame must be the frame without water: {}% of the pixels differ (mean difference {})", fChanged * 100.0f, fMean);
+    PL_TEST_BOOL_MSG(fChanged < 0.05f, "With a failing surface pass the frame must be the frame without water: %.1f%% of the pixels differ (mean difference %.4f)", fChanged * 100.0f, fMean);
   }
   if (PL_TEST_BOOL(CompareImages(m_pOwnApplication->GetLastScreenshot(), m_WithWater, fMean, fChanged)))
   {
-    PL_TEST_BOOL_MSG(fChanged > 0.2f, "The failing surface pass still drew water ({}% of the pixels differ from the frame with water)", fChanged * 100.0f);
+    PL_TEST_BOOL_MSG(fChanged > 0.2f, "The failing surface pass still drew water (%.1f%% of the pixels differ from the frame with water)", fChanged * 100.0f);
   }
 
   restore();

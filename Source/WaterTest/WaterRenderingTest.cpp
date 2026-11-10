@@ -651,13 +651,16 @@ bool plWaterRenderingTestApplication::HasValidLakeJunction()
                                  snapshot.m_fFlowFieldLength >= 3.0f && snapshot.m_fFlowFieldHalfWidth > 0.0f &&
                                  snapshot.m_fFlowFieldSpeed > 0.0f && snapshot.m_fFlowFieldDirectionSign > 0.0f &&
                                  snapshot.m_vFlowFieldDirection.GetLengthSquared() > 0.9f;
-    const bool bHasExactLakeStitch = snapshot.m_uiStitchedRiverVertexCount >= 3 && snapshot.m_uiStitchedLakeVertexCount >= 2 &&
-                                     snapshot.m_fMaximumLakeSeamError <= 0.00001f &&
-                                     snapshot.m_fLakeMaterialConvergenceDistance > 0.0f &&
-                                     (snapshot.m_vStitchedLakeLeft - snapshot.m_vStitchedLakeRight).GetLengthSquared() > 0.01f;
-    const bool bHasRenderableSurface = snapshot.m_bMergedIntoPrimary
-                                         ? snapshot.m_hMergedSurfaceMesh.IsValid() && snapshot.m_uiMergedSurfacePrimitiveCount > 0
-                                         : snapshot.m_hSurfaceMesh.IsValid() && snapshot.m_uiSurfacePrimitiveCount > 0;
+    // The river's mesh and the lake's mesh hold the same vertices on the mouth line, at every level of detail.
+    const bool bHasExactLakeStitch = snapshot.m_uiSharedVertexCount[0] >= 3 && snapshot.m_uiSharedVertexCount[1] >= 2 && snapshot.m_uiSharedVertexCount[2] >= 2 &&
+                                     snapshot.m_fMaximumSeamError <= 0.0f &&
+                                     snapshot.m_fMixLengthReceiver > 0.0f &&
+                                     (snapshot.m_vMouthLeft - snapshot.m_vMouthRight).GetLengthSquared() > 0.01f;
+    plWaterBodySnapshot river;
+    plWaterBodySnapshot lake;
+    const plWaterWorldModule* pModule = m_pWorld->GetOrCreateModule<plWaterWorldModule>();
+    const bool bHasRenderableSurface = pModule->TryGetBodySnapshot(snapshot.m_PrimaryBody, river) && pModule->TryGetBodySnapshot(snapshot.m_SecondaryBody, lake) &&
+                                       river.m_bGeometryValid && lake.m_bGeometryValid && river.m_FiniteMeshLods.GetCount() == 3 && lake.m_FiniteMeshLods.GetCount() == 3;
     if (snapshot.m_bValid && bHasRenderableSurface && bHasInflowField && bHasExactLakeStitch)
       return true;
   }

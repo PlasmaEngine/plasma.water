@@ -80,7 +80,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plWaterAttachmentAnchor, 1)
   PL_ENUM_CONSTANT(plWaterAttachmentAnchor::OceanBoundary),
 PL_END_STATIC_REFLECTED_ENUM;
 
-PL_BEGIN_COMPONENT_TYPE(plWaterJunctionComponent, 1, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plWaterJunctionComponent, 2, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -90,6 +90,7 @@ PL_BEGIN_COMPONENT_TYPE(plWaterJunctionComponent, 1, plComponentMode::Static)
     PL_ENUM_ACCESSOR_PROPERTY("AnchorB", plWaterAttachmentAnchor, GetAnchorB, SetAnchorB),
     PL_ACCESSOR_PROPERTY("BlendDistance", GetBlendDistance, SetBlendDistance)->AddAttributes(new plDefaultValueAttribute(5.0f), new plClampValueAttribute(0.0f, 100000.0f)),
     PL_ACCESSOR_PROPERTY("AutoBlendDistance", GetAutoBlendDistance, SetAutoBlendDistance)->AddAttributes(new plDefaultValueAttribute(true)),
+    PL_ACCESSOR_PROPERTY("FrontBreakup", GetFrontBreakup, SetFrontBreakup)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_ACCESSOR_PROPERTY("AutoSnap", GetAutoSnap, SetAutoSnap)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_ACCESSOR_PROPERTY("SnapRadius", GetSnapRadius, SetSnapRadius)->AddAttributes(new plDefaultValueAttribute(5.0f), new plClampValueAttribute(0.0f, 100000.0f)),
     PL_ACCESSOR_PROPERTY("ElevationTolerance", GetElevationTolerance, SetElevationTolerance)->AddAttributes(new plDefaultValueAttribute(0.25f), new plClampValueAttribute(0.0f, 100000.0f)),
@@ -127,12 +128,13 @@ void plWaterJunctionComponent::SerializeComponent(plWorldWriter& inout_stream) c
   stream << m_fElevationTolerance;
   stream << m_bAutoSnap;
   stream << m_bAutoBlendDistance;
+  stream << m_fFrontBreakup;
 }
 
 void plWaterJunctionComponent::DeserializeComponent(plWorldReader& inout_stream)
 {
   SUPER::DeserializeComponent(inout_stream);
-  inout_stream.GetComponentTypeVersion(GetStaticRTTI());
+  const plUInt32 uiVersion = inout_stream.GetComponentTypeVersion(GetStaticRTTI());
   m_hBodyA = inout_stream.ReadGameObjectHandle();
   m_hBodyB = inout_stream.ReadGameObjectHandle();
   auto& stream = inout_stream.GetStream();
@@ -143,6 +145,8 @@ void plWaterJunctionComponent::DeserializeComponent(plWorldReader& inout_stream)
   stream >> m_fElevationTolerance;
   stream >> m_bAutoSnap;
   stream >> m_bAutoBlendDistance;
+  if (uiVersion >= 2)
+    stream >> m_fFrontBreakup;
 }
 
 void plWaterJunctionComponent::SetBodyAReference(const char* szReference)
@@ -174,6 +178,12 @@ void plWaterJunctionComponent::SetBodyB(plGameObjectHandle hObject)
 void plWaterJunctionComponent::SetBlendDistance(float fDistance)
 {
   m_fBlendDistance = plMath::Max(fDistance, 0.0f);
+  InvalidateJunction();
+}
+
+void plWaterJunctionComponent::SetFrontBreakup(float fBreakup)
+{
+  m_fFrontBreakup = plMath::Saturate(fBreakup);
   InvalidateJunction();
 }
 
@@ -262,6 +272,7 @@ void plWaterJunctionComponent::InvalidateJunction()
   descriptor.m_uiAttachmentA = m_AnchorA.GetValue();
   descriptor.m_uiAttachmentB = m_AnchorB.GetValue();
   descriptor.m_fHeightTolerance = m_fElevationTolerance;
+  descriptor.m_fFrontBreakup = m_fFrontBreakup;
   const float fRiverWidth = snapshotA.m_Descriptor.m_Type == plWaterBodyType::River
                               ? fWidthA
                               : (snapshotB.m_Descriptor.m_Type == plWaterBodyType::River ? fWidthB : 0.0f);

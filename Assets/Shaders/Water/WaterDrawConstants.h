@@ -14,6 +14,6 @@ BEGIN_PUSH_CONSTANTS(plWaterDrawConstants)
   FLOAT4(SurfaceParams); // x: simulation time (s), yzw: unused
   UINT4(PatchParams); // x: cells per side, y: spectrum layer count, z: debug mode, w: geometry type
   UINT4(VolumeFilterParams); // x: primary body ID, y: junction secondary body ID, z: active body ID, w: filter enabled
-  UINT4(ProfileParams); // x: profile of the draw, y: second profile of the draw (the same when there is none), z: entries in the profile table, w: unused
+  UINT4(ProfileParams); // x: profile of the draw, y: second profile of the draw (the same when there is none), z: entries in the profile table, w: ocean patch seams (bits 0-3 inner mask, 4-7 outer mask, 8-15 ring)
 }
 END_PUSH_CONSTANTS(plWaterDrawConstants)
