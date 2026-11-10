@@ -1,0 +1,56 @@
+[PLATFORMS]
+DESKTOP
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Water/WaterSimulationConstants.h>
+
+// The transformed wave field as the surface shaders read it.
+//   Displacement: xyz = where a point of the still surface is moved to (xy scaled by the profile's steepness),
+//                 w = how far the surface is folded over itself there (0 none, 1 fully): where waves break.
+//   Slope:        xy = height gradient, z = its squared length (for the roughness of what a mip averages away),
+//                 w = the Jacobian of the horizontal displacement (below 1: compressed, below 0: folded).
+
+StructuredBuffer<plWaterGpuSpectrumProfile> WaterSpectrumProfiles;
+Texture2DArray<float4> WaterFftInputA;
+Texture2DArray<float4> WaterFftInputB;
+RWTexture2DArray<float4> WaterSpectrumDisplacementOutput;
+RWTexture2DArray<float4> WaterSpectrumSlopeOutput;
+
+[numthreads(WATER_SIMULATION_THREAD_GROUP_SIZE, WATER_SIMULATION_THREAD_GROUP_SIZE, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  if (dispatchThreadId.x >= WaterSimulationSize.x || dispatchThreadId.y >= WaterSimulationSize.y || dispatchThreadId.z >= WaterSimulationSize.z)
+    return;
+
+  const uint cascadeSlots = max(WaterSimulationSize.z / WATER_MAX_SPECTRUM_PROFILES, 1u);
+  const uint profileIndex = min(dispatchThreadId.z / cascadeSlots, WATER_MAX_SPECTRUM_PROFILES - 1u);
+  const plWaterGpuSpectrumProfile profile = WaterSpectrumProfiles[profileIndex];
+  if (profile.ProfileParams.w == 0u || (dispatchThreadId.z % cascadeSlots) >= min(profile.ProfileParams.z, cascadeSlots))
+  {
+    WaterSpectrumDisplacementOutput[dispatchThreadId] = 0.0;
+    WaterSpectrumSlopeOutput[dispatchThreadId] = float4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
+  // Each complex number holds two real fields (see WaterSpectrumUpdate).
+  const float4 a = WaterFftInputA.Load(int4(dispatchThreadId, 0));
+  const float4 b = WaterFftInputB.Load(int4(dispatchThreadId, 0));
+  const float height = a.x;
+  const float2 displacement = float2(a.y, a.z);
+  const float2 slope = float2(a.w, b.x);
+  const float displacementXX = b.y;
+  const float displacementYY = b.z;
+  const float displacementXY = b.w;
+
+  // Steepness is how far the water is pushed towards the crests. At one the sharpest crests just begin to fold.
+  const float choppiness = saturate(profile.WaveParams.y) * 1.6;
+  const float jacobian = (1.0 + choppiness * displacementXX) * (1.0 + choppiness * displacementYY) - choppiness * choppiness * displacementXY * displacementXY;
+  const float fold = saturate((0.55 - jacobian) * 2.2);
+
+  WaterSpectrumDisplacementOutput[dispatchThreadId] = float4(displacement * choppiness, height, fold);
+  WaterSpectrumSlopeOutput[dispatchThreadId] = float4(slope, dot(slope, slope), jacobian);
+}

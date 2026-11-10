@@ -169,6 +169,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
   }
 
   plRenderGraphTextureHandle hSimulationSpectrum;
+  plRenderGraphTextureHandle hSimulationSlope;
   plRenderGraphTextureHandle hSimulationInteraction;
   if (m_bSimulationInitialized)
   {
@@ -178,6 +179,8 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
 
     if (!m_GpuSimulation.GetSpectrumDisplacement().IsInvalidated())
       hSimulationSpectrum = ref_graph.ImportTexture(m_GpuSimulation.GetSpectrumDisplacement());
+    if (!m_GpuSimulation.GetSpectrumSlope().IsInvalidated())
+      hSimulationSlope = ref_graph.ImportTexture(m_GpuSimulation.GetSpectrumSlope());
     if (!m_GpuSimulation.GetInteractionAtlas().IsInvalidated())
       hSimulationInteraction = ref_graph.ImportTexture(m_GpuSimulation.GetInteractionAtlas());
   }
@@ -217,7 +220,10 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     pass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
     if (!hSimulationSpectrum.IsInvalidated())
       pass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+    if (!hSimulationSlope.IsInvalidated())
+      pass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
     if (!hSimulationInteraction.IsInvalidated())
       pass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
         plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -238,6 +244,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterOpaqueDepth", ctx.ResolveTexture(hResolvedDepth));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+      renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
       RenderObjects(renderViewContext);
     });
@@ -252,7 +259,10 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     pass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
     if (!hSimulationSpectrum.IsInvalidated())
       pass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+    if (!hSimulationSlope.IsInvalidated())
+      pass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
     if (!hSimulationInteraction.IsInvalidated())
       pass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
         plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -282,6 +292,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       renderViewContext.m_pRenderContext->SetShaderPermutationVariable("WATER_RENDER_PASS", "WATER_RENDER_PASS_VOLUME");
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+      renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
       renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_RENDER_PASS).BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
       RenderObjects(renderViewContext);
     });
@@ -321,7 +332,10 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       fieldPass.ReadBuffer(hProfileTable, plGALResourceState::ShaderRead, profileTableStages);
       if (!hSimulationSpectrum.IsInvalidated())
         fieldPass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-          plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+          plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+      if (!hSimulationSlope.IsInvalidated())
+        fieldPass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+          plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
       if (!hSimulationInteraction.IsInvalidated())
         fieldPass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
           plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -364,6 +378,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
         bindGroup.BindBuffer("plWaterCausticFieldConstants", m_hCausticFieldConstants);
         bindGroup.BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
         bindGroup.BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+        bindGroup.BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
         bindGroup.BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
         RenderObjects(renderViewContext);
       });
@@ -513,7 +528,10 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     pass.ReadTexture(hResolvedDepth, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::PixelShader);
     if (!hSimulationSpectrum.IsInvalidated())
       pass.ReadTexture(hSimulationSpectrum, {}, plGALResourceState::ShaderRead,
-        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
+    if (!hSimulationSlope.IsInvalidated())
+      pass.ReadTexture(hSimulationSlope, {}, plGALResourceState::ShaderRead,
+        plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader | plGALShaderStageFlags::PixelShader);
     if (!hSimulationInteraction.IsInvalidated())
       pass.ReadTexture(hSimulationInteraction, {}, plGALResourceState::ShaderRead,
         plGALShaderStageFlags::VertexShader | plGALShaderStageFlags::DomainShader);
@@ -539,6 +557,7 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
       bindGroup.BindBuffer("WaterProfiles", ctx.ResolveBuffer(hProfileTable));
       bindGroup.BindTexture("WaterOpaqueDepth", ctx.ResolveTexture(hResolvedDepth));
       bindGroup.BindTexture("WaterSpectrumDisplacement", hSimulationSpectrum.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSpectrum));
+      bindGroup.BindTexture("WaterSpectrumSlope", hSimulationSlope.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationSlope));
       bindGroup.BindTexture("WaterInteractionAtlas", hSimulationInteraction.IsInvalidated() ? plGALTextureHandle() : ctx.ResolveTexture(hSimulationInteraction));
       RenderObjects(renderViewContext);
     });

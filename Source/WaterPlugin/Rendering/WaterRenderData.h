@@ -44,6 +44,8 @@ public:
   float m_fExtentV = 1.0f;
   float m_fBaseHeight = 0.0f;
   float m_fSimulationTime = 0.0f;
+  /// Rivers and lakes: the edge length their mesh was built with, at the level of detail that is drawn.
+  float m_fVertexSpacing = 1.0f;
 
   // What the surface pass reads off the draws of a frame before any shader runs: which profiles get a slot in the
   // wave simulation, and whether there is water in view that casts caustics.

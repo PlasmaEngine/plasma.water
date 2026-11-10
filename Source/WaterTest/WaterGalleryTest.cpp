@@ -482,7 +482,9 @@ plResult plWaterGalleryApplication::SetupScene(Scene scene, plUInt32 uiVariant)
       AddSunAndSky(plVec3(0.55f, 0.35f, 0.42f), 10.0f);
       // Calm is the Ocean preset as shipped. Breeze and Storm raise its waves; nothing else changes.
       const float fAmplitude[] = {0.14f, 0.45f, 1.4f};
-      const float fWind[] = {0.7f, 6.0f, 14.0f};
+      // Wind Speed is the pace of the deterministic swells, not metres per second: the storm's waves are taller and
+      // longer, and only a little faster.
+      const float fWind[] = {0.7f, 1.0f, 1.2f};
       const float fWavelength[] = {12.0f, 22.0f, 48.0f};
       const plUInt32 v = plMath::Min<plUInt32>(uiVariant, 2);
       AddWaterBody("Ocean", plWaterBodyType::Ocean, makeProfile(MakeOceanProfile(fAmplitude[v], fWind[v], fWavelength[v])), {}, false);

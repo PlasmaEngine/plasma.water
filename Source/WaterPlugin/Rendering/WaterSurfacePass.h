@@ -39,6 +39,9 @@ public:
   plVec3 GetMainLightDirection() const { return m_vMainLightDirection; }
   plVec3 GetMainLightColorIntensity() const { return m_vMainLightColorIntensity; }
 
+  /// \brief Texels along one cascade of the wave spectrum, 0 without one.
+  plUInt32 GetSpectrumResolution() const { return GetSpectrumLayerCount() > 0 ? m_SimulationQuality.m_uiSpectrumResolution : 0; }
+
   /// \brief Entries in the profile table this pass uploaded for the current frame. At least one.
   plUInt32 GetProfileCount() const { return m_uiProfileCount; }
 

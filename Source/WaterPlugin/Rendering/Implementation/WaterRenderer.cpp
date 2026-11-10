@@ -128,7 +128,11 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
     constants.PatchOriginAndBaseHeight = plVec4(pRenderData->m_vPatchOrigin.x, pRenderData->m_vPatchOrigin.y, pRenderData->m_vPatchOrigin.z, pRenderData->m_fBaseHeight);
     constants.PatchAxisUAndExtent = plVec4(pRenderData->m_vPatchAxisU.x, pRenderData->m_vPatchAxisU.y, pRenderData->m_vPatchAxisU.z, pRenderData->m_fExtentU);
     constants.PatchAxisVAndExtent = plVec4(pRenderData->m_vPatchAxisV.x, pRenderData->m_vPatchAxisV.y, pRenderData->m_vPatchAxisV.z, pRenderData->m_fExtentV);
-    constants.SurfaceParams = plVec4(pRenderData->m_fSimulationTime, 0.0f, 0.0f, 0.0f);
+    // How far apart the draw's vertices are: the spectrum is read at that scale by the vertices, and the pixels add the rest.
+    const float fVertexSpacing = pRenderData->m_uiGeometryType == plWaterRenderData::GeometryOceanPatch
+                                   ? pRenderData->m_fExtentU / static_cast<float>(plMath::Max(uiCellsPerSide, 1u))
+                                   : pRenderData->m_fVertexSpacing;
+    constants.SurfaceParams = plVec4(pRenderData->m_fSimulationTime, fVertexSpacing, pWaterPass != nullptr ? static_cast<float>(pWaterPass->GetSpectrumResolution()) : 0.0f, 0.0f);
     // Water.Debug.Stitch shows the profile weights, which is view 1.
     const plUInt32 uiDebugMode = cvar_WaterDebugStitch ? 1u : static_cast<plUInt32>(plMath::Max(cvar_WaterDebugJunctionPatches.GetValue(), 0));
     constants.PatchParams = plVec4U32(uiCellsPerSide, uiSpectrumLayerCount, uiDebugMode, pRenderData->m_uiGeometryType);

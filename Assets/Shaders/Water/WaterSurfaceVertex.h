@@ -1,8 +1,11 @@
 #pragma once
 
 #include <Shaders/Water/WaterProfile.h>
+#include <Shaders/Water/WaterSpectrumShape.h>
 
+// The wave spectrum's cascades, one layer per profile slot and cascade, with mips (see WaterSpectrumAssemble.plShader).
 Texture2DArray WaterSpectrumDisplacement BIND_GROUP(BG_RENDER_PASS);
+Texture2DArray WaterSpectrumSlope BIND_GROUP(BG_RENDER_PASS);
 Texture2DArray WaterInteractionAtlas BIND_GROUP(BG_RENDER_PASS);
 
 // What one profile's waves do to a point of the undisplaced surface.
@@ -15,7 +18,7 @@ struct WaterWaveField
 };
 
 WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseWorldPosition, float waveAttenuation,
-  float2 vertexFlowDirection, float simulationTime, uint spectrumLayers)
+  float2 vertexFlowDirection, float simulationTime, uint spectrumLayers, float vertexSpacing)
 {
   const float4 waveParams = profile.WaveParams;
   // A river's waves and detail run along the mesh's flow direction and travel with the current. Lakes and oceans
@@ -24,9 +27,15 @@ WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseW
   const float2 waveDirection = usesVertexFlow ? vertexFlowDirection : profile.WindAndFlow.xy;
   const float2 flowVelocity = usesVertexFlow ? vertexFlowDirection * (profile.WindAndFlow.z * profile.WindAndFlow.w) : float2(0.0, 0.0);
 
+  const uint cascadeSlots = max(spectrumLayers / 4u, 1u);
+  const uint cascadeCount = spectrumLayers > 0u ? min(min((uint)profile.SpectrumParams.y, cascadeSlots), 4u) : 0u;
+  // With a spectrum, the four deterministic swells give half their height to it: they are what gameplay queries
+  // follow, and on their own they are too regular to pass for a sea. plWaterSpectrum::s_fBaseWaveShare in C++.
+  const float baseShare = cascadeCount > 0u ? 0.5 : 1.0;
+
   float3 waveOffset;
   float3 waveNormal;
-  EvaluateWaterGerstner(baseWorldPosition.xy + flowVelocity * simulationTime, simulationTime, waveParams.x * waveAttenuation,
+  EvaluateWaterGerstner(baseWorldPosition.xy + flowVelocity * simulationTime, simulationTime, waveParams.x * baseShare * waveAttenuation,
     waveParams.y, waveParams.z, waveParams.w, waveDirection, waveOffset, waveNormal);
 
   WaterWaveField field;
@@ -35,31 +44,26 @@ WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseW
   field.Foam = 0.0;
   field.RippleCeiling = profile.SpectrumParams.z > 0.0 ? profile.SpectrumParams.z : max(waveParams.x * 2.0, 0.5);
 
-  const uint cascadeCount = min((uint)profile.SpectrumParams.y, 4u);
-  if (waveAttenuation > 0.0 && spectrumLayers > 0u && cascadeCount > 0u)
+  if (waveAttenuation > 0.0 && cascadeCount > 0u)
   {
-    const uint availableCascadeCount = max(spectrumLayers / 4u, 1u);
-    const uint firstSpectrumLayer = min((uint)profile.SpectrumParams.x, 3u) * availableCascadeCount;
-    float4 spectral = 0.0;
-    float spectralWeight = 0.0;
+    const float resolution = max(GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).z, 2.0);
+    const uint firstSpectrumLayer = min((uint)profile.SpectrumParams.x, 3u) * cascadeSlots;
     [unroll]
     for (uint cascade = 0u; cascade < 4u; ++cascade)
     {
-      if (cascade >= cascadeCount || cascade >= availableCascadeCount || firstSpectrumLayer + cascade >= spectrumLayers)
+      if (cascade >= cascadeCount)
         break;
-      const float cascadeDomainScale = exp2(float(cascade) * 2.0);
-      const float2 spectrumUV = baseWorldPosition.xy / max(waveParams.y * 4.0 * cascadeDomainScale, 1.0);
-      const float4 cascadeSample = WaterSpectrumDisplacement.SampleLevel(
-        LinearSampler, float3(spectrumUV, firstSpectrumLayer + cascade), 0);
-      const float cascadeWeight = 1.0 / exp2(float(cascade));
-      spectral += cascadeSample * cascadeWeight;
-      spectralWeight += cascadeWeight;
+      const float domainLength = WaterCascadeLength(waveParams.y, float(cascade), float(cascadeCount));
+      const float2 spectrumUV = baseWorldPosition.xy / domainLength;
+      // A vertex stands for the water between it and its neighbours: it reads the mip whose texels are that far apart.
+      // Waves shorter than the mesh can show are left to the pixel shader, which adds them as normals.
+      const float lod = max(log2(vertexSpacing * resolution / domainLength), 0.0);
+      const float4 displacement = WaterSpectrumDisplacement.SampleLevel(LinearSampler, float3(spectrumUV, firstSpectrumLayer + cascade), lod);
+      const float4 slope = WaterSpectrumSlope.SampleLevel(LinearSampler, float3(spectrumUV, firstSpectrumLayer + cascade), lod);
+      field.Offset += displacement.xyz * waveAttenuation;
+      field.Gradient += slope.xy * waveAttenuation;
+      field.Foam = max(field.Foam, displacement.w);
     }
-    spectral /= max(spectralWeight, 1.0);
-    // Spectrum XY stores slope, never horizontal position. Applying it as position folds the surface.
-    field.Offset.z += spectral.z * waveAttenuation;
-    field.Gradient += spectral.xy * waveAttenuation;
-    field.Foam = saturate(spectral.w);
   }
 
   return field;
@@ -69,9 +73,12 @@ WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseW
 // vertex path calls this once per authored vertex; the tessellated path calls it for every domain point.
 // profilePair is the vertex colour of a finite mesh (see DecodeWaterProfilePair); a procedural patch passes
 // float4(0, 1, 1, 1), which selects the draw's own profile.
+// spacingScale is one, except on the edge an ocean ring shares with the coarser ring outside it: there the vertices
+// of both rings have to read the waves at the coarser ring's scale, or the same point would be moved to two places.
 VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float waveAttenuation,
-  float2 vertexFlowDirection, float4 profilePair)
+  float2 vertexFlowDirection, float4 profilePair, float spacingScale)
 {
+  const float vertexSpacing = max(GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).y, 0.01) * max(spacingScale, 1.0);
   const uint spectrumLayers = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).y;
   const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
 
@@ -81,12 +88,12 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   DecodeWaterProfilePair(profilePair, profileIndexA, profileIndexB, profileBlend);
 
   WaterWaveField field = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexA), baseWorldPosition, waveAttenuation,
-    vertexFlowDirection, simulationTime, spectrumLayers);
+    vertexFlowDirection, simulationTime, spectrumLayers, vertexSpacing);
   [branch]
   if (profileBlend > 0.0 && profileIndexB != profileIndexA)
   {
     const WaterWaveField other = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexB), baseWorldPosition, waveAttenuation,
-      vertexFlowDirection, simulationTime, spectrumLayers);
+      vertexFlowDirection, simulationTime, spectrumLayers, vertexSpacing);
     // Two wave fields that have nothing to do with each other: a plain cross-fade would leave the water flattest
     // where they are mixed half and half. Weights whose squares add up to one keep the wave energy level across the mix.
     const float weightA = sqrt(1.0 - profileBlend);

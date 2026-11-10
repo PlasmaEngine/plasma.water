@@ -85,6 +85,7 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   const uint seams = GET_PUSH_CONSTANT(plWaterDrawConstants, ProfileParams).w;
   const uint outerSeamMask = (seams >> 4u) & 0xFu;
   const uint seamRatio = (seams >> 16u) & 0xFFu;
+  float spacingScale = 1.0;
   if (outerSeamMask != 0u && seamRatio > 1u)
   {
     const bool onWestOrEast = (gridIndex.x == 0u && (outerSeamMask & 1u) != 0u) || (gridIndex.x == cells && (outerSeamMask & 2u) != 0u);
@@ -93,7 +94,11 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
       gridIndex.y = ((gridIndex.y + seamRatio / 2u) / seamRatio) * seamRatio;
     if (onSouthOrNorth)
       gridIndex.x = ((gridIndex.x + seamRatio / 2u) / seamRatio) * seamRatio;
+    // And they read the waves at the coarser ring's scale, as that ring's own vertices on this edge do.
+    if (onWestOrEast || onSouthOrNorth)
+      spacingScale = float(seamRatio);
   }
+  // The inner edges of a ring are the outer edges of the ring inside it, whose vertices were just moved here: nothing to do.
   float2 uv = float2(gridIndex) / float(cells);
   const float4 originAndHeight = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchOriginAndBaseHeight);
   const float4 axisUAndExtent = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchAxisUAndExtent);
@@ -105,6 +110,7 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   // No vertices to carry a profile pair: both indices say "the draw's own".
   float4 profilePair = float4(0.0, 1.0, 1.0, 1.0);
 #else
+  float spacingScale = 1.0;
   float2 uv = Input.TexCoord0;
   float3 baseWorldPosition = Input.Position;
   float waveAttenuation = saturate(Input.TexCoord1.x);
@@ -122,7 +128,8 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   output.Normal = float3(0.0, 0.0, 1.0);
   output.TexCoord0 = uv;
   output.BaseWorldXY = baseWorldPosition.xy;
-  output.SpectrumFoam = 0.0;
+  // The domain stage has no other way to learn that a vertex lies on a ring seam.
+  output.SpectrumFoam = spacingScale;
 #if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
   output.Tangent = float3(vertexFlowDirection, 0.0);
   output.BiTangent = float3(-vertexFlowDirection.y, vertexFlowDirection.x, 0.0);
@@ -134,7 +141,7 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
 #endif
   return output;
 #else
-  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profilePair);
+  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profilePair, spacingScale);
 #endif
 }
 
@@ -270,7 +277,15 @@ VS_OUT main(WaterTessellationFactors factors, OutputPatch<VS_OUT, 3> patch,
 #if CAMERA_MODE == CAMERA_MODE_STEREO
   s_ActiveCameraEyeIndex = patch[0].RenderTargetArrayIndex;
 #endif
-  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profilePair);
+  // A point of a ring seam lies between two corners that are both on the seam; the third corner's weight is zero there.
+  float spacingScale = 1.0;
+  if (barycentric.x < 1.0e-4)
+    spacingScale = min(patch[1].SpectrumFoam, patch[2].SpectrumFoam);
+  else if (barycentric.y < 1.0e-4)
+    spacingScale = min(patch[2].SpectrumFoam, patch[0].SpectrumFoam);
+  else if (barycentric.z < 1.0e-4)
+    spacingScale = min(patch[0].SpectrumFoam, patch[1].SpectrumFoam);
+  return EvaluateWaterSurfaceVertex(baseWorldPosition, uv, waveAttenuation, vertexFlowDirection, profilePair, max(spacingScale, 1.0));
 }
 #endif
 
@@ -302,9 +317,61 @@ VS_OUT main(WaterTessellationFactors factors, OutputPatch<VS_OUT, 3> patch,
 #include <Shaders/Water/WaterJunctionConstants.h>
 #include <Shaders/Water/WaterWaveCommon.h>
 #include <Shaders/Water/WaterProfile.h>
+#include <Shaders/Water/WaterSpectrumShape.h>
 
 Texture2DArray WaterSceneColor BIND_GROUP(BG_RENDER_PASS);
 Texture2DArray WaterOpaqueDepth BIND_GROUP(BG_RENDER_PASS);
+// The wave spectrum's cascades, as in WaterSurfaceVertex.h. The vertices carry the waves the mesh can show; here the
+// rest of them become normals.
+Texture2DArray WaterSpectrumDisplacement BIND_GROUP(BG_RENDER_PASS);
+Texture2DArray WaterSpectrumSlope BIND_GROUP(BG_RENDER_PASS);
+
+// What the spectrum adds to a pixel beyond what its vertices already hold.
+struct WaterSpectrumDetail
+{
+  float2 Gradient; // height gradient of the waves between the vertices
+  float Variance;  // slope variance of the waves smaller than the pixel: they cannot be drawn, only blur the reflection
+  float Fold;      // how far the surface is folded over itself here, 0..1
+};
+
+WaterSpectrumDetail EvaluateWaterSpectrumDetail(plWaterGpuProfile profile, float2 baseWorldXY, uint spectrumLayers)
+{
+  WaterSpectrumDetail detail;
+  detail.Gradient = 0.0;
+  detail.Variance = 0.0;
+  detail.Fold = 0.0;
+
+  const uint cascadeSlots = max(spectrumLayers / 4u, 1u);
+  const uint cascadeCount = spectrumLayers > 0u ? min(min((uint)profile.SpectrumParams.y, cascadeSlots), 4u) : 0u;
+  if (cascadeCount == 0u)
+    return detail;
+
+  const float4 surfaceParams = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams);
+  const float vertexSpacing = max(surfaceParams.y, 0.01);
+  const float resolution = max(surfaceParams.z, 2.0);
+  const uint firstSpectrumLayer = min((uint)profile.SpectrumParams.x, 3u) * cascadeSlots;
+  [unroll]
+  for (uint cascade = 0u; cascade < 4u; ++cascade)
+  {
+    if (cascade >= cascadeCount)
+      break;
+    const float domainLength = WaterCascadeLength(profile.WaveParams.y, float(cascade), float(cascadeCount));
+    const float3 uv = float3(baseWorldXY / domainLength, firstSpectrumLayer + cascade);
+    const float vertexLod = max(log2(vertexSpacing * resolution / domainLength), 0.0);
+
+    // The mip the pixel covers, and the mip its vertices read. Their difference is the detail that lies between the
+    // vertices. Far away the pixel's mip is the coarser one, and the difference takes back what the vertices show of
+    // waves that are smaller than a pixel.
+    const float4 pixelSlope = WaterSpectrumSlope.Sample(LinearSampler, uv);
+    const float4 vertexSlope = WaterSpectrumSlope.SampleLevel(LinearSampler, uv, vertexLod);
+    detail.Gradient += pixelSlope.xy - vertexSlope.xy;
+    // A mip holds the mean of the slopes and the mean of their squares. What is missing between the two is the
+    // variance of the slopes that were averaged away.
+    detail.Variance += max(pixelSlope.z - dot(pixelSlope.xy, pixelSlope.xy), 0.0);
+    detail.Fold = max(detail.Fold, WaterSpectrumDisplacement.Sample(LinearSampler, uv).w);
+  }
+  return detail;
+}
 // One detail normal and one foam texture per draw: the drawing body's. A blend with another profile samples the same
 // pair with that profile's scale and drift.
 Texture2D WaterNormalTexture BIND_GROUP(BG_DRAW_CALL);
@@ -759,8 +826,29 @@ float4 main(PS_IN input) : SV_Target0
   // Interaction data is deliberately absent from the pixel stage. Its only visible contribution is the
   // displaced vertex position and coherent vertex normal produced above; no atlas-shaped shading is painted
   // over the resulting geometry.
+  // The waves of the spectrum that the mesh is too coarse for. Two profiles mix as their wave fields do in the
+  // vertex stage: with weights whose squares add up to one.
+  const uint spectrumLayers = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchParams).y;
+  WaterSpectrumDetail spectrumDetail = EvaluateWaterSpectrumDetail(profileA, input.BaseWorldXY, spectrumLayers);
+  [branch]
+  if (profileIndexA != profileIndexB && profileBlend > 0.0)
+  {
+    const WaterSpectrumDetail other = EvaluateWaterSpectrumDetail(profileB, input.BaseWorldXY, spectrumLayers);
+    spectrumDetail.Gradient = spectrumDetail.Gradient * sqrt(1.0 - profileBlend) + other.Gradient * sqrt(profileBlend);
+    spectrumDetail.Variance = lerp(spectrumDetail.Variance, other.Variance, profileBlend);
+    spectrumDetail.Fold = lerp(spectrumDetail.Fold, other.Fold, profileBlend);
+  }
+#if WATER_GEOMETRY_SOURCE == WATER_GEOMETRY_SOURCE_FINITE
+  const float pixelWaveAttenuation = saturate(input.TexCoord1.x);
+#else
+  const float pixelWaveAttenuation = 1.0;
+#endif
+  const float3 vertexNormal = normalize(input.Normal);
+  const float2 vertexGradient = -vertexNormal.xy / max(vertexNormal.z, 0.1);
+  const float3 waveNormal = normalize(float3(-(vertexGradient + spectrumDetail.Gradient * pixelWaveAttenuation), 1.0));
+
   const float3 surfaceNormal = ApplyWaterNormalDetail(
-    input.Normal, input.WorldPosition, profileA, profileB, materialProfileBlend, primaryFlowVelocity, secondaryFlowVelocity);
+    waveNormal, input.WorldPosition, profileA, profileB, materialProfileBlend, primaryFlowVelocity, secondaryFlowVelocity);
   const float3 viewDirection = normalize(GetCameraPosition() - input.WorldPosition);
   // Thickness is intentionally the full distance to the visible opaque surface. Where no floor geometry
   // exists the transmittance collapses to zero and the extinction lerp below produces the authored deep
@@ -782,7 +870,12 @@ float4 main(PS_IN input) : SV_Target0
   // relative IOR in each direction.
   // Determine the incident medium from the macro surface, not the high-frequency detail normal: tiny normal-map
   // facets must not flip the camera between air and water at grazing angles.
-  const bool cameraOnNormalSide = dot(normalize(input.Normal), viewDirection) >= 0.0;
+  // The side comes from the triangle itself, not from a normal: far away, where a triangle spans a whole wave, the
+  // interpolated normal of its far slope faces away from the camera although the camera is above the water, and the
+  // pixel was shaded as seen from below. The surface is a height field, so the face normal that points up is its top.
+  float3 faceNormal = cross(ddx(input.WorldPosition), ddy(input.WorldPosition));
+  faceNormal = faceNormal.z >= 0.0 ? faceNormal : -faceNormal;
+  const bool cameraOnNormalSide = dot(faceNormal, viewDirection) >= 0.0;
   const float3 normal = cameraOnNormalSide ? surfaceNormal : -surfaceNormal;
   const float noV = saturate(dot(normal, viewDirection));
   const float ior = max(scatteringAndIor.w, 1.0);
@@ -840,7 +933,7 @@ float4 main(PS_IN input) : SV_Target0
   const float f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
   const float shoreFoam = pow(1.0 - saturate(thickness / max(foamParams.z, 0.01)), 3.0);
   const float crestFoam = saturate((foamParams.y - surfaceNormal.z) / max(foamParams.y * 0.35, 0.02));
-  const float spectralFoam = saturate(input.SpectrumFoam);
+  const float spectralFoam = saturate(max(input.SpectrumFoam, spectrumDetail.Fold * pixelWaveAttenuation));
   // River mouth churn: where the outflowing current and the incoming waves contest each other the water
   // breaks into foam. The strength is precomputed from the two bodies' energies (zero when either side is
   // calm) and the band peaks at the blend front, which the energy balance has already positioned.
@@ -862,7 +955,11 @@ float4 main(PS_IN input) : SV_Target0
   const float foam = saturate(baseFoam * max(foamParams.x, 0.0));
 
   const float slopeVariance = saturate(length(fwidth(normal.xy)) * 3.0);
-  const float perceptualRoughness = saturate(max(absorptionAndRoughness.w, 0.025) + slopeVariance * 0.35);
+  // Waves smaller than the pixel cannot be drawn as normals. What they do to a reflection is spread it, and that is
+  // what roughness is: the variance of their slopes is added to the squared GGX alpha.
+  const float baseRoughness = saturate(max(absorptionAndRoughness.w, 0.025) + slopeVariance * 0.35);
+  const float baseAlpha = baseRoughness * baseRoughness;
+  const float perceptualRoughness = saturate(sqrt(sqrt(baseAlpha * baseAlpha + min(spectrumDetail.Variance * pixelWaveAttenuation, 0.25))));
   plMaterialData materialData = (plMaterialData)0;
   materialData.worldPosition = input.WorldPosition;
   // The engine's lights look their shadows up here. Left at zero, every water pixel took the shadow of the world origin.

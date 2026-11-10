@@ -516,6 +516,7 @@ void plWaterBodyComponent::OnMsgExtractRenderData(plMsgExtractRenderData& msg) c
     pRenderData->m_uiPrimitiveCount = uiPrimitiveCount;
     pRenderData->m_uiGeometryRevision = info.m_uiGeometryRevision;
     pRenderData->m_uiLod = static_cast<plUInt8>(uiLod);
+    pRenderData->m_fVertexSpacing = plMath::Clamp(info.m_Profile.m_fFiniteMeshCellSize, 0.1f, 20.0f) * static_cast<float>(1u << uiLod);
     msg.AddRenderData(pRenderData, plWaterRenderData::WaterSurface, plRenderData::Caching::Never);
   };
   submit(lod.m_hSurfaceMesh, lod.m_uiSurfacePrimitiveCount, plWaterRenderData::GeometrySurface);
