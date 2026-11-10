@@ -187,9 +187,10 @@ public:
   virtual void AddInteraction(plWaterInteraction interaction) override;
   virtual plUInt64 CopyInteractionsSince(plUInt64 uiAfterSequence, plDynamicArray<plWaterInteraction>& out_interactions) const override;
 
-  /// \brief Starts the water's clock again at zero and drops what interactions there are. Waves are a function of
-  /// this clock, so a test that compares pictures calls it to make a scene look the same whatever ran before it.
-  void ResetSimulationClock();
+  /// \brief Sets the water's clock (to zero unless told otherwise) and drops what interactions there are. Waves are a
+  /// function of this clock, so a test that compares pictures calls it to make a scene look the same whatever ran
+  /// before it, and a test of what water looks like after ten minutes sets it to ten minutes.
+  void ResetSimulationClock(plTime startTime = plTime::MakeZero());
 
   /// \brief Debug-display only: the frame-data extractor of a primary (main/editor) view publishes the center
   /// of the currently valid 100 m interaction window here so Water.Debug.ShowInteractions can draw it.

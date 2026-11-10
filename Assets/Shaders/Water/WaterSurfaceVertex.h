@@ -18,14 +18,16 @@ struct WaterWaveField
 };
 
 WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseWorldPosition, float waveAttenuation,
-  float2 vertexFlowDirection, float simulationTime, uint spectrumLayers, float vertexSpacing)
+  float2 vertexFlowDirection, float2 ribbonCoordinates, float simulationTime, uint spectrumLayers, float vertexSpacing)
 {
   const float4 waveParams = profile.WaveParams;
-  // A river's waves and detail run along the mesh's flow direction and travel with the current. Lakes and oceans
-  // run with their wind and do not advect.
+  // A river's waves live in the river's own coordinates: metres along it and metres across. They run downstream and
+  // travel with the current, and because "along" follows the river, their crests stay square to the flow through
+  // every bend. (In world space, with the flow direction of each vertex as the wave direction, the waves of a bend
+  // all but vanished.) Lakes and oceans run with their wind in world space and do not advect.
   const bool usesVertexFlow = profile.SpectrumParams.w > 0.5;
-  const float2 waveDirection = usesVertexFlow ? vertexFlowDirection : profile.WindAndFlow.xy;
-  const float2 flowVelocity = usesVertexFlow ? vertexFlowDirection * (profile.WindAndFlow.z * profile.WindAndFlow.w) : float2(0.0, 0.0);
+  const float2 waveDirection = usesVertexFlow ? float2(1.0, 0.0) : profile.WindAndFlow.xy;
+  const float2 wavePosition = usesVertexFlow ? float2(ribbonCoordinates.x - profile.WindAndFlow.z * profile.WindAndFlow.w * simulationTime, ribbonCoordinates.y) : baseWorldPosition.xy;
 
   const uint cascadeSlots = max(spectrumLayers / 4u, 1u);
   const uint cascadeCount = spectrumLayers > 0u ? min(min((uint)profile.SpectrumParams.y, cascadeSlots), 4u) : 0u;
@@ -35,12 +37,19 @@ WaterWaveField EvaluateWaterProfileWaves(plWaterGpuProfile profile, float3 baseW
 
   float3 waveOffset;
   float3 waveNormal;
-  EvaluateWaterGerstner(baseWorldPosition.xy + flowVelocity * simulationTime, simulationTime, waveParams.x * baseShare * waveAttenuation,
+  EvaluateWaterGerstner(wavePosition, simulationTime, waveParams.x * baseShare * waveAttenuation,
     waveParams.y, waveParams.z, waveParams.w, waveDirection, waveOffset, waveNormal);
 
   WaterWaveField field;
   field.Offset = waveOffset;
   field.Gradient = -waveNormal.xy / max(waveNormal.z, 0.1);
+  if (usesVertexFlow)
+  {
+    // From the river's coordinates back to the world: "along" is the flow direction here, "across" is to its left.
+    const float2 acrossDirection = float2(-vertexFlowDirection.y, vertexFlowDirection.x);
+    field.Offset.xy = vertexFlowDirection * waveOffset.x + acrossDirection * waveOffset.y;
+    field.Gradient = vertexFlowDirection * field.Gradient.x + acrossDirection * field.Gradient.y;
+  }
   field.Foam = 0.0;
   field.RippleCeiling = profile.SpectrumParams.z > 0.0 ? profile.SpectrumParams.z : max(waveParams.x * 2.0, 0.5);
 
@@ -88,12 +97,12 @@ VS_OUT EvaluateWaterSurfaceVertex(float3 baseWorldPosition, float2 uv, float wav
   DecodeWaterProfilePair(profilePair, profileIndexA, profileIndexB, profileBlend);
 
   WaterWaveField field = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexA), baseWorldPosition, waveAttenuation,
-    vertexFlowDirection, simulationTime, spectrumLayers, vertexSpacing);
+    vertexFlowDirection, uv, simulationTime, spectrumLayers, vertexSpacing);
   [branch]
   if (profileBlend > 0.0 && profileIndexB != profileIndexA)
   {
     const WaterWaveField other = EvaluateWaterProfileWaves(LoadWaterProfile(profileIndexB), baseWorldPosition, waveAttenuation,
-      vertexFlowDirection, simulationTime, spectrumLayers, vertexSpacing);
+      vertexFlowDirection, uv, simulationTime, spectrumLayers, vertexSpacing);
     // Two wave fields that have nothing to do with each other: a plain cross-fade would leave the water flattest
     // where they are mixed half and half. Weights whose squares add up to one keep the wave energy level across the mix.
     const float weightA = sqrt(1.0 - profileBlend);

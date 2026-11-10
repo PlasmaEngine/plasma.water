@@ -487,7 +487,11 @@ plResult plWaterGalleryApplication::SetupScene(Scene scene, plUInt32 uiVariant)
       const float fWind[] = {0.7f, 1.0f, 1.2f};
       const float fWavelength[] = {12.0f, 22.0f, 48.0f};
       const plUInt32 v = plMath::Min<plUInt32>(uiVariant, 2);
-      AddWaterBody("Ocean", plWaterBodyType::Ocean, makeProfile(MakeOceanProfile(fAmplitude[v], fWind[v], fWavelength[v])), {}, false);
+      plWaterProfileResourceDescriptor oceanProfile = MakeOceanProfile(fAmplitude[v], fWind[v], fWavelength[v]);
+      // A storm's waves are steeper as well as taller: crests are pushed together until they break.
+      const float fSteepness[] = {0.24f, 0.4f, 0.62f};
+      oceanProfile.m_fWaveSteepness = fSteepness[v];
+      AddWaterBody("Ocean", plWaterBodyType::Ocean, makeProfile(std::move(oceanProfile)), {}, false);
       AddBox("Seabed", plVec3(0.0f, 0.0f, -41.0f), plVec3(4000.0f, 4000.0f, 2.0f), sand);
       AddBox("RockA", plVec3(34.0f, 6.0f, 0.5f), plVec3(7.0f, 5.0f, 9.0f), rock, plQuat::MakeFromAxisAndAngle(s_vUp, plAngle::MakeFromDegree(25.0f)));
       AddBox("RockB", plVec3(60.0f, -22.0f, 0.0f), plVec3(5.0f, 8.0f, 5.0f), rock, plQuat::MakeFromAxisAndAngle(s_vUp, plAngle::MakeFromDegree(-12.0f)));
@@ -632,6 +636,10 @@ plArrayPtr<const plWaterGalleryApplication::Shot> plWaterGalleryApplication::Get
     {"Overview", plVec3(0.0f, -34.0f, 26.0f), plVec3(0.0f, 0.0f, 0.0f)},
     {"InBend", plVec3(-16.0f, -16.0f, 3.0f), plVec3(0.0f, 0.0f, 0.0f)},
     {"FromAbove", plVec3(0.0f, -1.0f, 30.0f), plVec3(0.0f, 0.0f, 0.0f)},
+    // The same view after ten minutes of running water. Detail that is slid along the current tears apart in a bend
+    // over time; flow mapped detail looks as it did at the start.
+    {"InBend_After10Minutes", plVec3(-16.0f, -16.0f, 3.0f), plVec3(0.0f, 0.0f, 0.0f), 0, false, 600.0f},
+    {"FromAbove_After10Minutes", plVec3(0.0f, -1.0f, 30.0f), plVec3(0.0f, 0.0f, 0.0f), 0, false, 600.0f},
   };
 
   switch (scene)
@@ -655,6 +663,11 @@ void plWaterGalleryApplication::SetShot(const Shot& shot)
   if (plWaterRenderingTestGameState* pGameState = plDynamicCast<plWaterRenderingTestGameState*>(GetActiveGameState()))
   {
     pGameState->SetViewRenderMode(shot.m_bWireframe ? plViewRenderMode::WireframeMonochrome : plViewRenderMode::None);
+  }
+  if (shot.m_fClockSeconds >= 0.0f)
+  {
+    PL_LOCK(m_pWorld->GetWriteMarker());
+    m_pWorld->GetOrCreateModule<plWaterWorldModule>()->ResetSimulationClock(plTime::MakeFromSeconds(shot.m_fClockSeconds));
   }
 
   if (auto* pCVar = static_cast<plCVarInt*>(plCVar::FindCVarByName("Water.Debug.JunctionPatches")))

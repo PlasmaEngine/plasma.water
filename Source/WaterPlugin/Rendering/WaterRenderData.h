@@ -58,6 +58,7 @@ public:
   plUInt8 m_uiSpectrumMode = 0;
   plUInt32 m_uiGpuCascadeCount = 1;
   float m_fSmallestGpuWavelength = 0.5f;
+  float m_fFoamCrestThreshold = 0.78f;
   float m_fUnderwaterCaustics = 0.25f;
   float m_fReflectedCaustics = 0.15f;
 

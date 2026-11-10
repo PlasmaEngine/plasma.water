@@ -245,7 +245,9 @@ namespace
         plWaterGeometryVertex& vertex = work.m_Vertex;
         vertex.m_vPosition = plMath::Lerp(vLeftBank, vRightBank, t);
         vertex.m_vFlow = plVec3(tangent.x * samples[i].m_fFlowScale, tangent.y * samples[i].m_fFlowScale, 0.0f);
-        vertex.m_vTexCoord = plVec2(fDistanceAlongRiver, t);
+        // Ribbon coordinates: metres along the river and metres to the left of its middle. The river's waves are a
+        // function of these, so their crests stay square to the flow through every bend.
+        vertex.m_vTexCoord = plVec2(fDistanceAlongRiver, plMath::Lerp(fLeftWidth, -fRightWidth, t));
         vertex.m_fSignedShoreDistance = plMath::Lerp(fLeftWidth, -fRightWidth, t);
         vertex.m_fDepth = plMath::Max(samples[i].m_fDepth, 0.01f);
         vertex.m_fWaveAttenuation = plMath::SmoothStep(fDistanceToShore, 0.0f, plMath::Max(body.m_Settings.m_fShoreWaveFadeDistance, 0.01f));
@@ -292,6 +294,18 @@ namespace
     /// The river's flow where it meets the shore. Both copies of the mouth line and the lake's plume carry exactly this
     /// vector: the river's waves run along it, so a point of the line would otherwise move differently in the two parts.
     plVec3 m_vFlow = plVec3::MakeZero();
+    /// The river's ribbon coordinates carried on into the lake: metres along the river at this end, the point the
+    /// river's middle arrives at, and the directions of "along" and "left". A point of the lake near the mouth gets
+    /// its ribbon coordinates from these, and so do both copies of the mouth line.
+    float m_fRibbonAlong = 0.0f;
+    plVec2 m_vRibbonOrigin = plVec2::MakeZero();
+    plVec2 m_vRibbonForward = plVec2(1.0f, 0.0f);
+    plVec2 m_vRibbonLeft = plVec2(0.0f, 1.0f);
+    plVec2 RibbonCoordinates(const plVec3& vPosition) const
+    {
+      const plVec2 vOffset = vPosition.GetAsVec2() - m_vRibbonOrigin;
+      return plVec2(m_fRibbonAlong + vOffset.Dot(m_vRibbonForward), vOffset.Dot(m_vRibbonLeft));
+    }
     plHybridArray<plUInt32, 32> m_Chain; ///< The lake's vertices on the mouth line, from the river's left bank to its right.
     plHybridArray<plUInt32, 32> m_RiverChain; ///< The same points as vertices of the river's part.
   };
@@ -653,8 +667,13 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
     // The direction into the lake: across the shore, to the left of the counter-clockwise walk.
     mouth.m_vInward = plVec2(-vShoreDirection.y, vShoreDirection.x);
     {
-      const plVec2 vFlow = (uiEnd == 1 ? river.m_vOutward[uiEnd] : -river.m_vOutward[uiEnd]) * river.m_fFlowScale[uiEnd];
+      const plVec2 vForward = uiEnd == 1 ? river.m_vOutward[uiEnd] : -river.m_vOutward[uiEnd];
+      const plVec2 vFlow = vForward * river.m_fFlowScale[uiEnd];
       mouth.m_vFlow = plVec3(vFlow.x, vFlow.y, 0.0f);
+      mouth.m_fRibbonAlong = uiEnd == 1 ? river.m_fLength : 0.0f;
+      mouth.m_vRibbonOrigin = vEnd.GetAsVec2();
+      mouth.m_vRibbonForward = vForward;
+      mouth.m_vRibbonLeft = river.m_vLeft[uiEnd];
     }
     lake.m_Mouths.PushBack(mouth);
     result.m_vInward = mouth.m_vInward;
@@ -856,7 +875,7 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
         work.m_Vertex.m_fDepth = river.m_fDepth[uiEnd];
         work.m_fFromStart = uiEnd == 0 ? 0.0f : river.m_fLength;
         work.m_fFromEnd = uiEnd == 1 ? 0.0f : river.m_fLength;
-        work.m_Vertex.m_vTexCoord = plVec2(work.m_fFromStart, 0.0f);
+        work.m_Vertex.m_vTexCoord = pMouth->RibbonCoordinates(work.m_Vertex.m_vPosition);
         chain[uiEnd].PushBack(part.m_Vertices.GetCount());
         pMouth->m_RiverChain.PushBack(part.m_Vertices.GetCount());
         part.m_Vertices.PushBack(work);
@@ -946,7 +965,9 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
           work.m_Vertex.m_vPosition = plVec3(vPosition.x, vPosition.y, fHeight);
           work.m_Vertex.m_vFlow = plVec3(vFlow.x, vFlow.y, 0.0f);
           work.m_Vertex.m_fDepth = river.m_fDepth[uiEnd];
-          work.m_Vertex.m_vTexCoord = plVec2(uiEnd == 1 ? river.m_fLength + fLength * u : -fLength * u, t);
+          // The apron carries the river's ribbon coordinates out to sea. Left stays left: at a river's start the fan
+          // runs against the flow, and "along" counts down.
+          work.m_Vertex.m_vTexCoord = plVec2(uiEnd == 1 ? river.m_fLength + fLength * u : -fLength * u, plMath::Lerp(fRowLeft, -fRowRight, t));
           work.m_Vertex.m_fSignedShoreDistance = plMath::Lerp(fRowLeft, -fRowRight, t);
           // The banks end where the river ends. Past them the water is open and its waves are free.
           const float fRiverAttenuation = part.m_Vertices[river.Index(uiEndRow, uiColumn)].m_Vertex.m_fWaveAttenuation;
@@ -1161,6 +1182,7 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
           const float fPlume = plumeAt(vertex.m_Vertex.m_vPosition.GetAsVec2(), uiBestPlume);
           WorkVertex flowing = vertex;
           flowing.m_Vertex.m_vFlow = plume.m_vFlow;
+          flowing.m_Vertex.m_vTexCoord = plume.m_pMouth->RibbonCoordinates(vertex.m_Vertex.m_vPosition);
           out_part.m_Indices.PushBack(emitter.Emit(flowing, uiCorner, plume.m_uiRiver, body.m_uiProfileIndex, 1.0f - (1.0f - plume.m_fMouthWeight) * fPlume, plume.m_fFrontBreakup));
         }
       }
@@ -1197,6 +1219,9 @@ void plWaterNetworkMesher::Build(plArrayPtr<const plWaterNetworkBody> bodies, pl
         const plWaterGeometryVertex& b = lakePart.m_TopologyVertices[mouth.m_Chain[i]];
         fWorst = plMath::Max(fWorst, (a.m_vPosition - b.m_vPosition).GetLength());
         fWorst = plMath::Max(fWorst, plMath::Abs(a.m_fWaveAttenuation - b.m_fWaveAttenuation));
+        // The river's waves are a function of the ribbon coordinates: the lake's copy of the point has to get the same
+        // ones in the triangles that blend towards the river.
+        fWorst = plMath::Max(fWorst, (a.m_vTexCoord - mouth.RibbonCoordinates(b.m_vPosition)).GetLength());
       }
       result.m_fMaximumSeamError = fWorst;
       result.m_uiSharedVertexCount = mouth.m_Chain.GetCount();

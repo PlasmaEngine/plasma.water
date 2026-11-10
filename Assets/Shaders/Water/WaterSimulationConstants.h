@@ -12,7 +12,7 @@
 struct PL_SHADER_STRUCT plWaterGpuSpectrumProfile
 {
   FLOAT4(WindDirectionSpeedAmplitude); // xy: wind direction, z: wind speed, w: wave amplitude (m)
-  FLOAT4(WaveParams);                  // x: dominant wavelength (m), y: steepness (how far crests are pushed together), z: smallest wavelength (m), w: amplitude scale that normalises the spectrum
+  FLOAT4(WaveParams);                  // x: dominant wavelength (m), y: steepness (how far crests are pushed together), z: foam crest threshold, w: amplitude scale that normalises the spectrum
   UINT4(ProfileParams);                // x: seed, y: spectrum mode, z: cascades, w: 1 when the slot is in use
 };
 
@@ -26,5 +26,5 @@ struct PL_SHADER_STRUCT plWaterGpuInteraction
 CONSTANT_BUFFER(plWaterSimulationConstants, 5)
 {
   UINT4(WaterSimulationSize);  // xy: texels of a cascade, z: layers (profiles x cascades), w: profile slots
-  FLOAT4(WaterSimulationTime); // x: time (s), yzw: unused
+  FLOAT4(WaterSimulationTime); // x: time (s), y: time since the frame before (s), z: 1 when the foam history has to start from nothing, w: unused
 };

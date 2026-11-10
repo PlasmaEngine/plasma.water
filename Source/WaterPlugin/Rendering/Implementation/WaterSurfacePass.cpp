@@ -605,6 +605,7 @@ void plWaterSurfacePass::RefreshGpuSpectrumProfiles()
       profile.m_uiWaveSeed = it->m_uiWaveSeed;
       profile.m_SpectrumMode = static_cast<plWaterWaveSpectrumMode::Enum>(it->m_uiSpectrumMode);
       profile.m_fSmallestGpuWavelength = plMath::Max(it->m_fSmallestGpuWavelength, 0.01f);
+      profile.m_fFoamCrestThreshold = it->m_fFoamCrestThreshold;
       profile.m_uiGpuCascadeCount = static_cast<plUInt8>(plMath::Min<plUInt32>(it->m_uiGpuCascadeCount, m_SimulationQuality.m_uiSpectrumCascadeCount));
       profile.m_uiGpuCascadeResolution = m_SimulationQuality.m_uiSpectrumResolution;
       // Compact live profiles into the lowest slots so the spectrum pass can trim trailing array layers.

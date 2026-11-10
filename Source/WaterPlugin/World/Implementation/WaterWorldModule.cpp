@@ -412,10 +412,10 @@ void plWaterWorldModule::DrawDebug() const
   }
 }
 
-void plWaterWorldModule::ResetSimulationClock()
+void plWaterWorldModule::ResetSimulationClock(plTime startTime)
 {
   PL_LOCK(m_Mutex);
-  m_uiSimulationTick = 0;
+  m_uiSimulationTick = static_cast<plUInt64>(plMath::Max(startTime.GetSeconds(), 0.0) / s_fFixedStepSeconds);
   m_fSimulationAccumulator = 0.0;
   m_LastWallClockTime = plTime::Now();
   m_PendingInteractions.Clear();

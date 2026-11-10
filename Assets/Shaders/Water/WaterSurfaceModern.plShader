@@ -377,37 +377,56 @@ WaterSpectrumDetail EvaluateWaterSpectrumDetail(plWaterGpuProfile profile, float
 Texture2D WaterNormalTexture BIND_GROUP(BG_DRAW_CALL);
 Texture2D WaterFoamTexture BIND_GROUP(BG_DRAW_CALL);
 
+// Flow mapping. A texture that is simply slid along a current tears apart wherever the current turns, and the longer
+// it runs the worse it gets: after ten minutes in a river bend nothing of the pattern is left. Instead the pattern is
+// only ever slid for a few seconds, twice, half a cycle apart, and each copy is faded out before it is reset and the
+// other one shows. The offset never grows, so the pattern looks the same after an hour as after a second.
+float4 SampleWaterAlongFlow(Texture2D tex, float2 uv, float2 uvVelocity, float time)
+{
+  const float cycle = 3.2;
+  const float phase0 = frac(time / cycle);
+  const float phase1 = frac(time / cycle + 0.5);
+  const float weight0 = 1.0 - abs(phase0 * 2.0 - 1.0);
+  const float4 sample0 = tex.Sample(LinearSampler, uv + uvVelocity * ((phase0 - 0.5) * cycle));
+  const float4 sample1 = tex.Sample(LinearSampler, uv + uvVelocity * ((phase1 - 0.5) * cycle) + float2(0.37, 0.61));
+  return lerp(sample1, sample0, weight0);
+}
+
+// One profile's detail normal: two layers of the normal texture at different scales.
+float2 SampleWaterProfileNormalDetail(plWaterGpuProfile profile, float3 worldPosition, float2 flowVelocity, float simulationTime)
+{
+  if (profile.FoamMaterialParams.w <= 0.5)
+    return 0.0;
+
+  const float detailScale = max(profile.SurfaceDetailParams.x, 0.05);
+  float2 detail0;
+  float2 detail1;
+  if (profile.SpectrumParams.w > 0.5)
+  {
+    // A river: the detail travels with the current.
+    detail0 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.xy * (0.045 * detailScale), flowVelocity * 0.025, simulationTime).xy * 2.0 - 1.0;
+    detail1 = SampleWaterAlongFlow(WaterNormalTexture, worldPosition.yx * (0.083 * detailScale), -flowVelocity.yx * 0.017, simulationTime).xy * 2.0 - 1.0;
+  }
+  else
+  {
+    // A lake or an ocean: one direction of drift everywhere, which can be slid for ever.
+    const float2 uv0 = worldPosition.xy * (0.045 * detailScale) + flowVelocity * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
+    const float2 uv1 = worldPosition.yx * (0.083 * detailScale) - flowVelocity.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
+    detail0 = WaterNormalTexture.Sample(LinearSampler, uv0).xy * 2.0 - 1.0;
+    detail1 = WaterNormalTexture.Sample(LinearSampler, uv1).xy * 2.0 - 1.0;
+  }
+  return (detail0 + detail1 * 0.55) * profile.SurfaceDetailParams.y;
+}
+
 float3 ApplyWaterNormalDetail(float3 baseNormal, float3 worldPosition, plWaterGpuProfile profileA, plWaterGpuProfile profileB,
   float profileBlend, float2 primaryFlow, float2 secondaryFlow)
 {
   const float simulationTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
-  const float4 primaryDetailParams = profileA.SurfaceDetailParams;
-  const float primaryDetailScale = max(primaryDetailParams.x, 0.05);
-  float2 primaryDetail = 0.0;
-  if (profileA.FoamMaterialParams.w > 0.5)
-  {
-    const float2 uv0 = worldPosition.xy * (0.045 * primaryDetailScale) + primaryFlow * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
-    const float2 uv1 = worldPosition.yx * (0.083 * primaryDetailScale) - primaryFlow.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
-    const float2 detail0 = WaterNormalTexture.Sample(LinearSampler, uv0).xy * 2.0 - 1.0;
-    const float2 detail1 = WaterNormalTexture.Sample(LinearSampler, uv1).xy * 2.0 - 1.0;
-    primaryDetail = (detail0 + detail1 * 0.55) * primaryDetailParams.y;
-  }
+  float2 detail = SampleWaterProfileNormalDetail(profileA, worldPosition, primaryFlow, simulationTime);
+  [branch]
+  if (profileBlend > 0.0)
+    detail = lerp(detail, SampleWaterProfileNormalDetail(profileB, worldPosition, secondaryFlow, simulationTime), profileBlend);
 
-  const float4 secondaryDetailParams = profileB.SurfaceDetailParams;
-  const float secondaryDetailScale = max(secondaryDetailParams.x, 0.05);
-  float2 secondaryDetail = 0.0;
-  if (profileB.FoamMaterialParams.w > 0.5 && profileBlend > 0.0)
-  {
-    // The secondary lake evaluates the same localized current on its own draw, so this remains seam-identical
-    // at profileBlend 1 while allowing the river motion to continue visibly into (or out of) the basin.
-    const float2 secondaryUv0 = worldPosition.xy * (0.045 * secondaryDetailScale) + secondaryFlow * simulationTime * 0.025 + float2(simulationTime * 0.018, simulationTime * 0.011);
-    const float2 secondaryUv1 = worldPosition.yx * (0.083 * secondaryDetailScale) - secondaryFlow.yx * simulationTime * 0.017 + float2(-simulationTime * 0.013, simulationTime * 0.021);
-    const float2 secondaryDetail0 = WaterNormalTexture.Sample(LinearSampler, secondaryUv0).xy * 2.0 - 1.0;
-    const float2 secondaryDetail1 = WaterNormalTexture.Sample(LinearSampler, secondaryUv1).xy * 2.0 - 1.0;
-    secondaryDetail = (secondaryDetail0 + secondaryDetail1 * 0.55) * secondaryDetailParams.y;
-  }
-
-  const float2 detail = lerp(primaryDetail, secondaryDetail, profileBlend);
   const float distanceFade = saturate(1.0 - length(GetCameraPosition() - worldPosition) / 900.0);
   // Interaction slope is deliberately absent here: ripples are geometry. Adding it per pixel makes a coarse
   // mesh look embossed like a normal map even when its silhouette has not moved.
@@ -423,48 +442,40 @@ float ProceduralWaterFoamBreakup(float2 position, float scale)
     + 0.06 * sin((position.x + position.y) * scale * 5.0952 + 3.1));
 }
 
-float SamplePrimaryWaterFoamBreakup(plWaterGpuProfile profile, float3 worldPosition, float simulationTime, float2 primaryFlow)
+// One profile's foam pattern: where foam is thick and where it is thin.
+float SampleWaterProfileFoamBreakup(plWaterGpuProfile profile, float3 worldPosition, float simulationTime, float2 flowVelocity)
 {
-  const float primaryScale = max(abs(profile.FoamMaterialParams.y), 0.001);
-  const float2 primaryPosition = worldPosition.xy + primaryFlow * simulationTime + profile.WindAndFlow.xy * simulationTime * 0.15;
-  if (profile.FoamMaterialParams.z > 0.5)
+  const float scale = max(abs(profile.FoamMaterialParams.y), 0.001);
+  if (profile.SpectrumParams.w > 0.5 && profile.FoamMaterialParams.z > 0.5)
   {
-    const float primary0 = WaterFoamTexture.Sample(LinearSampler, primaryPosition * primaryScale).r;
-    const float primary1 = WaterFoamTexture.Sample(LinearSampler,
-      primaryPosition.yx * (primaryScale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
-    return saturate(primary0 * 0.62 + primary1 * 0.38);
+    // A river: foam rides the current, flow mapped like the detail normals.
+    const float foam0 = SampleWaterAlongFlow(WaterFoamTexture, worldPosition.xy * scale, -flowVelocity * scale, simulationTime).r;
+    const float foam1 = SampleWaterAlongFlow(WaterFoamTexture, worldPosition.yx * (scale * 0.61), -flowVelocity.yx * (scale * 0.61), simulationTime).r;
+    return saturate(foam0 * 0.62 + foam1 * 0.38);
   }
-  return ProceduralWaterFoamBreakup(primaryPosition, primaryScale);
-}
 
-float SampleSecondaryWaterFoamBreakup(plWaterGpuProfile profile, float3 worldPosition, float simulationTime, float2 secondaryFlow)
-{
-  // Mirrors the primary formula using the receiving lake's localized flow so the junction and lake remain
-  // identical at the material endpoint while foam streaks travel in the current direction.
-  const float secondaryScale = max(abs(profile.FoamMaterialParams.y), 0.001);
-  const float2 secondaryPosition = worldPosition.xy + secondaryFlow * simulationTime + profile.WindAndFlow.xy * simulationTime * 0.15;
+  const float2 position = worldPosition.xy + flowVelocity * simulationTime + profile.WindAndFlow.xy * simulationTime * 0.15;
   if (profile.FoamMaterialParams.z > 0.5)
   {
-    const float secondary0 = WaterFoamTexture.Sample(LinearSampler, secondaryPosition * secondaryScale).r;
-    const float secondary1 = WaterFoamTexture.Sample(LinearSampler,
-      secondaryPosition.yx * (secondaryScale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
-    return saturate(secondary0 * 0.62 + secondary1 * 0.38);
+    const float foam0 = WaterFoamTexture.Sample(LinearSampler, position * scale).r;
+    const float foam1 = WaterFoamTexture.Sample(LinearSampler,
+      position.yx * (scale * 0.61) + float2(simulationTime * 0.013, -simulationTime * 0.009)).r;
+    return saturate(foam0 * 0.62 + foam1 * 0.38);
   }
-  return ProceduralWaterFoamBreakup(secondaryPosition, secondaryScale);
+  return ProceduralWaterFoamBreakup(position, scale);
 }
 
 float SampleWaterFoamBreakup(plWaterGpuProfile profileA, plWaterGpuProfile profileB, float3 worldPosition, float profileBlend,
   float simulationTime, float2 primaryFlow, float2 secondaryFlow)
 {
-  // Ordinary bodies and exact junction endpoints evaluate one material only. The branches are coherent for a
-  // draw and avoid the other profile's texture reads or procedural sine field.
+  // A body's own water and the pure ends of a mix evaluate one profile only.
   if (profileBlend <= 0.0001)
-    return SamplePrimaryWaterFoamBreakup(profileA, worldPosition, simulationTime, primaryFlow);
+    return SampleWaterProfileFoamBreakup(profileA, worldPosition, simulationTime, primaryFlow);
   if (profileBlend >= 0.9999)
-    return SampleSecondaryWaterFoamBreakup(profileB, worldPosition, simulationTime, secondaryFlow);
+    return SampleWaterProfileFoamBreakup(profileB, worldPosition, simulationTime, secondaryFlow);
 
-  return lerp(SamplePrimaryWaterFoamBreakup(profileA, worldPosition, simulationTime, primaryFlow),
-    SampleSecondaryWaterFoamBreakup(profileB, worldPosition, simulationTime, secondaryFlow), profileBlend);
+  return lerp(SampleWaterProfileFoamBreakup(profileA, worldPosition, simulationTime, primaryFlow),
+    SampleWaterProfileFoamBreakup(profileB, worldPosition, simulationTime, secondaryFlow), profileBlend);
 }
 
 // The cutout is evaluated on the UNDISPLACED world position: the boundary is authored in base space and the
@@ -948,7 +959,13 @@ float4 main(PS_IN input) : SV_Target0
   const float3 refractedSceneColor = sceneColor * transmittance;
 
   const float f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
-  const float shoreFoam = pow(1.0 - saturate(verticalDepth / max(foamParams.z, 0.01)), 3.0);
+  // Shore foam: thickest where the water runs out, and beyond that in lines that follow the depth and travel up the
+  // beach, as the last of each wave does. Lines of equal depth are lines along the shore, whatever its shape.
+  const float shoreRamp = 1.0 - saturate(verticalDepth / max(foamParams.z, 0.01));
+  const float lapTime = GET_PUSH_CONSTANT(plWaterDrawConstants, SurfaceParams).x;
+  const float lapPhase = verticalDepth / max(foamParams.z, 0.01) * 9.0 + lapTime * 0.9 + sin(dot(input.BaseWorldXY, float2(0.37, 0.23))) * 1.3;
+  const float lapLines = pow(saturate(sin(lapPhase) * 0.5 + 0.5), 6.0);
+  const float shoreFoam = saturate(pow(shoreRamp, 3.0) + lapLines * shoreRamp * 0.6);
   const float crestFoam = saturate((foamParams.y - surfaceNormal.z) / max(foamParams.y * 0.35, 0.02));
   const float spectralFoam = saturate(max(input.SpectrumFoam, spectrumDetail.Fold * pixelWaveAttenuation));
   // River mouth churn: where the outflowing current and the incoming waves contest each other the water

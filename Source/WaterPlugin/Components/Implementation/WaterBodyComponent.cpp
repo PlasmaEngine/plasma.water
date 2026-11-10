@@ -83,6 +83,7 @@ namespace
     out_renderData.m_uiWaveSeed = profile.m_uiWaveSeed;
     out_renderData.m_uiSpectrumMode = static_cast<plUInt8>(profile.m_SpectrumMode.GetValue());
     out_renderData.m_fSmallestGpuWavelength = profile.m_fSmallestGpuWavelength;
+    out_renderData.m_fFoamCrestThreshold = profile.m_fFoamCrestThreshold;
     const bool bSpectrumAllowed = info.m_Type == plWaterBodyType::Ocean || (info.m_Type == plWaterBodyType::Lake && profile.m_bEnableLakeSpectrum);
     out_renderData.m_uiGpuCascadeCount = bSpectrumAllowed ? profile.m_uiGpuCascadeCount : 0;
     out_renderData.m_fUnderwaterCaustics = profile.m_fUnderwaterCaustics;

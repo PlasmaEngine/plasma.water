@@ -63,6 +63,10 @@ private:
   plConstantBufferStorageHandle m_hConstants; ///< Spectrum pass constants.
   plGALTextureHandle m_hSpectrum;
   plGALTextureHandle m_hSpectrumSlope;
+  /// What is left of the foam that breaking waves made in earlier frames, per cascade.
+  plGALTextureHandle m_hSpectrumFoam;
+  plTime m_LastFoamTime;
+  bool m_bFoamHistoryValid = false;
   /// The wave field in the frequency domain, and the scratch pair for the first half of its transform.
   plGALTextureHandle m_hSpectrumFrequency[2];
   plGALTextureHandle m_hSpectrumScratch[2];

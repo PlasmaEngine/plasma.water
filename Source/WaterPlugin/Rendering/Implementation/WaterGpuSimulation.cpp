@@ -179,11 +179,15 @@ bool plWaterGpuSimulation::Initialize(const plWaterQualitySettings& quality)
       m_hSpectrumFrequency[i] = pDevice->CreateTexture(workDesc);
       m_hSpectrumScratch[i] = pDevice->CreateTexture(workDesc);
     }
-    if (m_hSpectrumSlope.IsInvalidated() || m_hSpectrumFrequency[0].IsInvalidated() || m_hSpectrumFrequency[1].IsInvalidated() ||
+    plGALTextureCreationDescription foamDesc = workDesc;
+    foamDesc.m_Format = plGALResourceFormat::RFloat;
+    m_hSpectrumFoam = pDevice->CreateTexture(foamDesc);
+    m_bFoamHistoryValid = false;
+    if (m_hSpectrumSlope.IsInvalidated() || m_hSpectrumFoam.IsInvalidated() || m_hSpectrumFrequency[0].IsInvalidated() || m_hSpectrumFrequency[1].IsInvalidated() ||
         m_hSpectrumScratch[0].IsInvalidated() || m_hSpectrumScratch[1].IsInvalidated())
     {
       // Without all of them there is no spectrum. The surface falls back to its analytic waves.
-      for (plGALTextureHandle* pHandle : {&m_hSpectrum, &m_hSpectrumSlope, &m_hSpectrumFrequency[0], &m_hSpectrumFrequency[1], &m_hSpectrumScratch[0], &m_hSpectrumScratch[1]})
+      for (plGALTextureHandle* pHandle : {&m_hSpectrum, &m_hSpectrumSlope, &m_hSpectrumFoam, &m_hSpectrumFrequency[0], &m_hSpectrumFrequency[1], &m_hSpectrumScratch[0], &m_hSpectrumScratch[1]})
       {
         if (!pHandle->IsInvalidated())
           pDevice->DestroyTexture(*pHandle);
@@ -272,7 +276,7 @@ void plWaterGpuSimulation::DestroyResources()
   if (pDevice == nullptr)
     return;
 
-  for (plGALTextureHandle* pHandle : {&m_hSpectrum, &m_hSpectrumSlope, &m_hSpectrumFrequency[0], &m_hSpectrumFrequency[1], &m_hSpectrumScratch[0], &m_hSpectrumScratch[1]})
+  for (plGALTextureHandle* pHandle : {&m_hSpectrum, &m_hSpectrumSlope, &m_hSpectrumFoam, &m_hSpectrumFrequency[0], &m_hSpectrumFrequency[1], &m_hSpectrumScratch[0], &m_hSpectrumScratch[1]})
   {
     if (!pHandle->IsInvalidated())
       pDevice->DestroyTexture(*pHandle);
@@ -541,7 +545,7 @@ void plWaterGpuSimulation::AddRenderPasses(plRenderGraph& ref_graph, plRenderPip
       {
         const plWaterProfileResourceDescriptor& profile = m_Profiles[i].m_Profile;
         gpuProfiles[i].WindDirectionSpeedAmplitude = plVec4(profile.m_vWindDirection.x, profile.m_vWindDirection.y, profile.m_fWindSpeed, profile.m_fWaveAmplitude);
-        gpuProfiles[i].WaveParams = plVec4(profile.m_fBaseWavelength, profile.m_fWaveSteepness, profile.m_fSmallestGpuWavelength, m_Profiles[i].m_bInUse ? GetAmplitudeScale(i) : 0.0f);
+        gpuProfiles[i].WaveParams = plVec4(profile.m_fBaseWavelength, profile.m_fWaveSteepness, profile.m_fFoamCrestThreshold, m_Profiles[i].m_bInUse ? GetAmplitudeScale(i) : 0.0f);
         gpuProfiles[i].ProfileParams = plVec4U32(profile.m_uiWaveSeed, static_cast<plUInt32>(profile.m_SpectrumMode.GetValue()), profile.m_uiGpuCascadeCount, m_Profiles[i].m_bInUse ? 1u : 0u);
       }
 
@@ -573,6 +577,7 @@ void plWaterGpuSimulation::AddRenderPasses(plRenderGraph& ref_graph, plRenderPip
     const plRenderGraphTextureHandle hFrequencyB = ref_graph.ImportTexture(m_hSpectrumFrequency[1]);
     const plRenderGraphTextureHandle hScratchA = ref_graph.ImportTexture(m_hSpectrumScratch[0]);
     const plRenderGraphTextureHandle hScratchB = ref_graph.ImportTexture(m_hSpectrumScratch[1]);
+    const plRenderGraphTextureHandle hFoam = ref_graph.ImportTexture(m_hSpectrumFoam);
 
     const plUInt32 uiResolution = m_Quality.m_uiSpectrumResolution;
     const plUInt32 uiCascadeSlots = m_Quality.m_uiSpectrumCascadeCount;
@@ -602,12 +607,20 @@ void plWaterGpuSimulation::AddRenderPasses(plRenderGraph& ref_graph, plRenderPip
         {
           // No water with a spectrum in view: nothing is computed, and nothing may be sampled.
           m_bSpectrumValid = false;
+          m_bFoamHistoryValid = false;
           return;
         }
 
+        // Foam remembers the frames before. If there is none to remember (the first frame, or the clock was set
+        // back), it starts from nothing; if the frames are far apart, what is left is what would have faded anyway.
+        const double fSinceLast = (m_TotalTime - m_LastFoamTime).GetSeconds();
+        const bool bStartFoam = !m_bFoamHistoryValid || fSinceLast < 0.0;
+        m_LastFoamTime = m_TotalTime;
+        m_bFoamHistoryValid = true;
+
         plWaterSimulationConstants* constants = plRenderContext::GetConstantBufferData<plWaterSimulationConstants>(m_hConstants);
         constants->WaterSimulationSize = plVec4U32(uiResolution, uiResolution, uiLayerCount, MaxSpectrumProfiles);
-        constants->WaterSimulationTime = plVec4(static_cast<float>(m_TotalTime.GetSeconds()), 0.0f, 0.0f, 0.0f);
+        constants->WaterSimulationTime = plVec4(static_cast<float>(m_TotalTime.GetSeconds()), static_cast<float>(plMath::Clamp(fSinceLast, 0.0, 30.0)), bStartFoam ? 1.0f : 0.0f, 0.0f);
         const plRenderViewContext& renderViewContext = *ctx.GetUserData<plRenderViewContext>();
         plRenderContext* pContext = renderViewContext.m_pRenderContext;
         plBindGroupBuilder& bindGroup = pContext->GetBindGroup();
@@ -659,6 +672,7 @@ void plWaterGpuSimulation::AddRenderPasses(plRenderGraph& ref_graph, plRenderPip
       pass.ReadTexture(hFrequencyB, {}, plGALResourceState::ComputeShaderRead);
       pass.WriteTexture(hDisplacement, {}, plGALResourceState::UnorderedAccessWrite);
       pass.WriteTexture(hSlope, {}, plGALResourceState::UnorderedAccessWrite);
+      pass.WriteTexture(hFoam, {}, plGALResourceState::UnorderedAccessWrite);
       pass.HasSideEffects();
       pass.SetExecuteCallback([=](const plRenderGraphContext& ctx) {
         const plUInt32 uiLive = liveLayerCount();
@@ -675,6 +689,7 @@ void plWaterGpuSimulation::AddRenderPasses(plRenderGraph& ref_graph, plRenderPip
         // The shader writes the top mip; the chain below it is generated right after.
         bindGroup.BindTexture("WaterSpectrumDisplacementOutput", ctx.ResolveTexture(hDisplacement));
         bindGroup.BindTexture("WaterSpectrumSlopeOutput", ctx.ResolveTexture(hSlope));
+        bindGroup.BindTexture("WaterSpectrumFoamHistory", ctx.ResolveTexture(hFoam));
         pContext->BindShader(m_hSpectrumAssembleShader);
         const plUInt32 uiGroups = (uiResolution + WATER_SIMULATION_THREAD_GROUP_SIZE - 1) / WATER_SIMULATION_THREAD_GROUP_SIZE;
         m_bSpectrumValid = pContext->Dispatch(uiGroups, uiGroups, uiLive).Succeeded();

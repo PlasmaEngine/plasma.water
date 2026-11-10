@@ -28,6 +28,7 @@ public:
     plVec3 m_vTarget;
     plInt32 m_iDebugMode = 0; ///< Water.Debug.JunctionPatches while the shot is taken: a shading term instead of the picture.
     bool m_bWireframe = false; ///< The view's wireframe mode, for looking at the mesh itself.
+    float m_fClockSeconds = -1.0f; ///< Sets the water's clock to this before the shot settles. Negative: leave it running.
   };
 
   plResult SetupScene(Scene scene, plUInt32 uiVariant = 0);
