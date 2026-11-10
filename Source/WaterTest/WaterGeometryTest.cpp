@@ -182,4 +182,40 @@ PL_CREATE_SIMPLE_TEST(Water, Geometry)
     PL_TEST_BOOL(bFoundInnerSeam);
     PL_TEST_BOOL(bFoundOuterSeam);
   }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Ocean ring seams close: a ring's outer edge has no vertex the next ring lacks")
+  {
+    // Every combination of patch resolution, quality grid and ripple refinement that the renderer can choose.
+    for (plUInt32 uiResolution : {8u, 32u, 48u, 64u, 512u})
+    {
+      for (plUInt32 uiQualityCells : {32u, 48u, 64u})
+      {
+        for (plUInt32 uiMultiplier : {1u, 2u, 4u})
+        {
+          for (plUInt32 uiRing = 0; uiRing + 1 < 12; ++uiRing)
+          {
+            const plUInt32 uiCells = plWaterGeometry::GetOceanRingCells(uiResolution, uiQualityCells, uiRing, uiRing <= 1 ? uiMultiplier : 1);
+            const plUInt32 uiOuterCells = plWaterGeometry::GetOceanRingCells(uiResolution, uiQualityCells, uiRing + 1, uiRing + 1 <= 1 ? uiMultiplier : 1);
+            const plUInt32 uiRatio = plWaterGeometry::GetOceanSeamRatio(uiCells, uiOuterCells);
+            PL_TEST_BOOL(plMath::IsPowerOf2(uiCells) && uiCells >= 2);
+
+            // The edge of one patch of this ring is half the edge of a patch of the outer ring. In units of this
+            // ring's cells, the outer ring has a vertex every uiRatio cells, and both ends of the edge are among them.
+            PL_TEST_INT((uiCells * 2) % uiOuterCells, 0);
+            PL_TEST_INT(uiCells % uiRatio, 0);
+            for (plUInt32 uiIndex = 0; uiIndex <= uiCells; ++uiIndex)
+            {
+              const plUInt32 uiSnapped = plWaterGeometry::SnapOceanSeamIndex(uiIndex, uiRatio);
+              PL_TEST_BOOL(uiSnapped <= uiCells);
+              PL_TEST_INT(uiSnapped % uiRatio, 0);
+              // Never farther than half a coarse cell: the surface is moved as little as closing the seam takes.
+              PL_TEST_BOOL(plMath::Abs(static_cast<plInt32>(uiSnapped) - static_cast<plInt32>(uiIndex)) <= static_cast<plInt32>(uiRatio / 2));
+            }
+            PL_TEST_INT(plWaterGeometry::SnapOceanSeamIndex(0, uiRatio), 0);
+            PL_TEST_INT(plWaterGeometry::SnapOceanSeamIndex(uiCells, uiRatio), uiCells);
+          }
+        }
+      }
+    }
+  }
 }

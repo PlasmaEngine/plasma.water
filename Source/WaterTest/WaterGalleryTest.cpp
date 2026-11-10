@@ -592,6 +592,9 @@ plArrayPtr<const plWaterGalleryApplication::Shot> plWaterGalleryApplication::Get
     {"Low", plVec3(0.0f, 0.0f, 1.7f), plVec3(40.0f, 4.0f, 0.5f)},
     {"Deck", plVec3(-6.0f, -4.0f, 12.0f), plVec3(40.0f, 4.0f, 0.0f)},
     {"High", plVec3(-40.0f, -30.0f, 120.0f), plVec3(40.0f, 4.0f, 0.0f)},
+    // Where the innermost ring (cells of 0.5 m) meets the next (2 m), 64 m from the camera's patch: as drawn, and as wireframe.
+    {"RingSeam", plVec3(40.0f, 0.0f, 9.0f), plVec3(66.0f, 6.0f, 0.0f)},
+    {"RingSeam_Wireframe", plVec3(40.0f, 0.0f, 9.0f), plVec3(66.0f, 6.0f, 0.0f), 0, true},
   };
   static const Shot s_Beach[] = {
     // The same waterline at three camera pitches (gentle beach), then the steep beach.
@@ -647,6 +650,11 @@ plArrayPtr<const plWaterGalleryApplication::Shot> plWaterGalleryApplication::Get
 
 void plWaterGalleryApplication::SetShot(const Shot& shot)
 {
+  if (plWaterRenderingTestGameState* pGameState = plDynamicCast<plWaterRenderingTestGameState*>(GetActiveGameState()))
+  {
+    pGameState->SetViewRenderMode(shot.m_bWireframe ? plViewRenderMode::WireframeMonochrome : plViewRenderMode::None);
+  }
+
   if (auto* pCVar = static_cast<plCVarInt*>(plCVar::FindCVarByName("Water.Debug.JunctionPatches")))
   {
     *pCVar = shot.m_iDebugMode;

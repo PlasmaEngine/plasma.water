@@ -76,7 +76,25 @@ VS_OUT main(uint vertexID : SV_VertexID, uint instanceID : SV_InstanceID)
   const uint cellIndex = vertexID / 6u;
   const uint vertexInCell = vertexID % 6u;
   const uint2 cell = uint2(cellIndex % cells, cellIndex / cells);
-  float2 uv = float2(cell + quadOffsets[vertexInCell]) / float(cells);
+  uint2 gridIndex = cell + quadOffsets[vertexInCell];
+
+  // Ring seams. The ring outside this one has coarser cells, so along the edge where the two meet this patch has
+  // vertices the other has not, and waves would open a crack at every one of them. Those vertices move along the edge
+  // onto the nearest vertex of the coarser ring: the triangles between collapse, and the two rings share the edge.
+  // plWaterGeometry::SnapOceanSeamIndex is the same rule in C++.
+  const uint seams = GET_PUSH_CONSTANT(plWaterDrawConstants, ProfileParams).w;
+  const uint outerSeamMask = (seams >> 4u) & 0xFu;
+  const uint seamRatio = (seams >> 16u) & 0xFFu;
+  if (outerSeamMask != 0u && seamRatio > 1u)
+  {
+    const bool onWestOrEast = (gridIndex.x == 0u && (outerSeamMask & 1u) != 0u) || (gridIndex.x == cells && (outerSeamMask & 2u) != 0u);
+    const bool onSouthOrNorth = (gridIndex.y == 0u && (outerSeamMask & 4u) != 0u) || (gridIndex.y == cells && (outerSeamMask & 8u) != 0u);
+    if (onWestOrEast)
+      gridIndex.y = ((gridIndex.y + seamRatio / 2u) / seamRatio) * seamRatio;
+    if (onSouthOrNorth)
+      gridIndex.x = ((gridIndex.x + seamRatio / 2u) / seamRatio) * seamRatio;
+  }
+  float2 uv = float2(gridIndex) / float(cells);
   const float4 originAndHeight = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchOriginAndBaseHeight);
   const float4 axisUAndExtent = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchAxisUAndExtent);
   const float4 axisVAndExtent = GET_PUSH_CONSTANT(plWaterDrawConstants, PatchAxisVAndExtent);

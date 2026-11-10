@@ -18,6 +18,11 @@ class PL_WATER_DLL plWaterRenderData : public plInstanceableRenderData
 public:
   static plRenderData::Category WaterSurface;
 
+  /// The order water draws are made in: back to front within a layer, and the layers in order (m_uiSortLayer). Water
+  /// does not write depth, so what is drawn last shows. A river's apron has to come after the ocean it lies on, from
+  /// wherever it is looked at.
+  static plUInt64 GetSortingKey(const plRenderData* pRenderData, const plCamera& camera);
+
   /// m_uiGeometryType: what the shader is given to draw.
   enum GeometryType : plUInt32
   {
@@ -79,6 +84,8 @@ public:
   plUInt32 m_uiProfileIndex = 0;
   plUInt32 m_uiGeometryType = GeometryOceanPatch;
   plUInt32 m_uiCellsPerSide = 32;
+  /// Ocean patches: the body's Patch Resolution, from which the cells of every ring follow (plWaterGeometry::GetOceanRingCells).
+  plUInt32 m_uiOceanResolution = 64;
   plUInt32 m_uiPrimitiveCount = 32 * 32 * 2;
   plUInt32 m_uiGeometryRevision = 0;
   plUInt8 m_uiLod = 0;

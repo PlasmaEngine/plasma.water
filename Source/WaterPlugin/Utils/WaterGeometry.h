@@ -108,6 +108,19 @@ public:
   static void BuildOceanClipmap(plUInt8 uiRingCount, plUInt16 uiPatchResolution, float fBasePatchSize,
     plDynamicArray<plWaterOceanClipmapPatch>& out_patches);
 
+  /// Cells along one side of an ocean patch of a ring. A power of two that halves from ring to ring (while a patch
+  /// doubles in size) and never falls below two; uiMultiplier refines a ring as a whole. Because every count is an even
+  /// power of two, the vertices of a ring's outer edge include every vertex the next ring has there.
+  static plUInt32 GetOceanRingCells(plUInt32 uiPatchResolution, plUInt32 uiQualityCells, plUInt32 uiRing, plUInt32 uiMultiplier = 1);
+
+  /// How many cells of a ring lie along one cell of the ring outside it, at the edge where the two meet.
+  static plUInt32 GetOceanSeamRatio(plUInt32 uiRingCells, plUInt32 uiOuterRingCells);
+
+  /// Moves a vertex of a ring's outer edge, given by its index along the edge, onto the nearest vertex of the ring
+  /// outside it. The vertex shader does the same (WaterSurfaceModern.plShader), which closes the ring seam: on that edge
+  /// the fine ring then has no vertex the coarse ring lacks.
+  static plUInt32 SnapOceanSeamIndex(plUInt32 uiIndex, plUInt32 uiSeamRatio);
+
   static bool IsPointInPolygonXY(plArrayPtr<const plVec3> polygon, const plVec2& point, float fEpsilon = 0.001f);
   static bool FindClosestPointOnRiver(plArrayPtr<const plWaterControlPoint> points, const plVec2& point, plWaterRiverLocation& out_location);
 };

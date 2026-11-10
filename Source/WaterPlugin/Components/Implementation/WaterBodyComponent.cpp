@@ -456,6 +456,7 @@ void plWaterBodyComponent::OnMsgExtractRenderData(plMsgExtractRenderData& msg) c
       const plUInt32 uiResolution = plMath::Clamp<plUInt32>(static_cast<plUInt32>(patch.m_uiResolution) >> plMath::Min<plUInt8>(patch.m_uiLod, 6), 2u, 64u);
       FillCommonRenderData(*pRenderData, info, center, uiResolution, 0, fSimulationTime);
       pRenderData->m_uiLod = patch.m_uiLod;
+      pRenderData->m_uiOceanResolution = patch.m_uiResolution;
       pRenderData->m_uiInnerSeamMask = patch.m_uiInnerSeamMask;
       pRenderData->m_uiOuterSeamMask = patch.m_uiOuterSeamMask;
       pRenderData->m_vPatchOrigin = plVec3(center2.x - patch.m_fPatchSize * 0.5f, center2.y - patch.m_fPatchSize * 0.5f, 0.0f);

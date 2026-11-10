@@ -27,6 +27,7 @@ public:
     plVec3 m_vPosition;
     plVec3 m_vTarget;
     plInt32 m_iDebugMode = 0; ///< Water.Debug.JunctionPatches while the shot is taken: a shading term instead of the picture.
+    bool m_bWireframe = false; ///< The view's wireframe mode, for looking at the mesh itself.
   };
 
   plResult SetupScene(Scene scene, plUInt32 uiVariant = 0);

@@ -2,6 +2,9 @@
 
 #include <Foundation/Containers/Map.h>
 #include <Foundation/Containers/Set.h>
+#include <Core/Graphics/Camera.h>
+#include <RendererCore/Pipeline/SortingFunctions.h>
+#include <WaterPlugin/Rendering/WaterRenderData.h>
 #include <WaterPlugin/Utils/WaterNetworkMesher.h>
 
 namespace
@@ -290,6 +293,43 @@ PL_CREATE_SIMPLE_TEST(Water, Network)
     PL_TEST_BOOL(PartIsWellFormed(mesh.m_Parts[0]));
     PL_TEST_BOOL(PartIsWellFormed(mesh.m_Parts[1]));
     PL_TEST_FLOAT(PartArea(mesh.m_Parts[1]), 38.0f * 4.0f, 0.05f);
+  }
+
+  PL_TEST_BLOCK(plTestBlock::Enabled, "From eight sides of a river mouth, the ocean is drawn before the apron")
+  {
+    // Water does not write depth: whichever draw comes last is what shows. Sorted by distance alone, the ocean patch
+    // under a river's apron comes last from some sides and first from others, and the mouth changes as the camera
+    // walks round it. With layers it never does.
+    const plVec3 vMouth(40.0f, 10.0f, 0.0f);
+    plWaterRenderData river;
+    river.m_vGlobalPosition = plVec3(15.0f, 8.0f, 1.0f); // the middle of the river's bounds, well inland
+    river.m_uiSortLayer = 1;
+    plWaterRenderData oceanPatches[3];
+    oceanPatches[0].m_vGlobalPosition = plVec3(48.0f, 16.0f, 0.0f);    // the patch the apron lies on
+    oceanPatches[1].m_vGlobalPosition = plVec3(-16.0f, 16.0f, 0.0f);   // one under the land, behind the river
+    oceanPatches[2].m_vGlobalPosition = plVec3(400.0f, -300.0f, 0.0f); // one far out
+    for (plWaterRenderData& patch : oceanPatches)
+      patch.m_uiSortLayer = 0;
+
+    for (plUInt32 uiSide = 0; uiSide < 8; ++uiSide)
+    {
+      const plAngle angle = plAngle::MakeFromDegree(45.0f * uiSide);
+      const plVec3 vEye = vMouth + plVec3(plMath::Cos(angle) * 30.0f, plMath::Sin(angle) * 30.0f, 9.0f);
+      plCamera camera;
+      camera.SetCameraMode(plCameraMode::PerspectiveFixedFovY, 55.0f, 0.1f, 4000.0f);
+      camera.LookAt(vEye, vMouth, plVec3(0.0f, 0.0f, 1.0f));
+
+      const plUInt64 uiRiverKey = plWaterRenderData::GetSortingKey(&river, camera);
+      bool bDistanceAloneWouldFlip = false;
+      for (const plWaterRenderData& patch : oceanPatches)
+      {
+        PL_TEST_BOOL_MSG(plWaterRenderData::GetSortingKey(&patch, camera) < uiRiverKey, "From side %u an ocean patch is drawn after the river", uiSide);
+        bDistanceAloneWouldFlip |= plRenderSortingFunctions::BackToFrontThenByRenderData(&patch, camera) > plRenderSortingFunctions::BackToFrontThenByRenderData(&river, camera);
+      }
+      // The test has teeth: from at least the sea side, distance alone puts an ocean patch after the river.
+      if (uiSide == 0)
+        PL_TEST_BOOL(bDistanceAloneWouldFlip);
+    }
   }
 
   PL_TEST_BLOCK(plTestBlock::Enabled, "Volume under a part is closed along its outline")

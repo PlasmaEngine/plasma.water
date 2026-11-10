@@ -10,6 +10,7 @@
 #include <WaterPlugin/Rendering/WaterRenderData.h>
 #include <WaterPlugin/Rendering/WaterRenderer.h>
 #include <WaterPlugin/Rendering/WaterSurfacePass.h>
+#include <WaterPlugin/Utils/WaterGeometry.h>
 
 #include <Shaders/Water/WaterDrawConstants.h>
 #include <Shaders/Water/WaterJunctionConstants.h>
@@ -70,31 +71,29 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
     plVec4 vActiveInteractionBounds = plVec4::MakeZero();
     const bool bInteractionBoundsValid = pWaterPass != nullptr && pWaterPass->GetActiveInteractionBounds(vActiveInteractionBounds);
     plUInt32 uiCellsPerSide = pRenderData->m_uiCellsPerSide;
-    if (pWaterPass != nullptr)
+    plUInt32 uiSeams = 0;
+    if (pWaterPass != nullptr && pRenderData->m_uiGeometryType == plWaterRenderData::GeometryOceanPatch)
     {
       const plWaterQualitySettings& quality = *pQuality;
-      if (pRenderData->m_uiGeometryType == 0)
+      if (pRenderData->m_uiLod >= quality.m_uiOceanRingCount)
+        continue;
+
+      // How fine a ring is drawn is decided for the ring as a whole: every patch of a ring has the same cells, so
+      // patches of one ring always meet vertex to vertex, and a ring knows the cells of the ring outside it.
+      // Without hull and domain stages, ripples need the extra vertices in the grid itself: the two inner rings are
+      // refined while there are any.
+      const plUInt32 uiRippleMultiplier = (!bUseTessellation && bInteractionBoundsValid) ? (quality.m_Tier == plWaterQualityTier::Ultra ? 4u : 2u) : 1u;
+      auto ringCells = [&](plUInt32 uiRing)
       {
-        if (pRenderData->m_uiLod >= quality.m_uiOceanRingCount)
-          continue;
+        return plWaterGeometry::GetOceanRingCells(pRenderData->m_uiOceanResolution, quality.m_uiOceanCellsPerRing, uiRing, uiRing <= 1 ? uiRippleMultiplier : 1u);
+      };
+      uiCellsPerSide = ringCells(pRenderData->m_uiLod);
 
-        const plUInt32 uiQualityCells = plMath::Max<plUInt32>(
-          static_cast<plUInt32>(quality.m_uiOceanCellsPerRing) >> plMath::Min<plUInt8>(pRenderData->m_uiLod, 6), 2u);
-        uiCellsPerSide = plMath::Min(uiCellsPerSide, uiQualityCells);
-
-        // Capability fallback for devices without hull/domain stages. Tessellated devices keep the ordinary
-        // base grid and generate interaction detail in the domain shader instead of multiplying every cell.
-        const plVec2 vPatchMin(pRenderData->m_vPatchOrigin.x, pRenderData->m_vPatchOrigin.y);
-        const plVec2 vPatchMax = vPatchMin + plVec2(pRenderData->m_fExtentU, pRenderData->m_fExtentV);
-        const bool bTouchesInteraction = bInteractionBoundsValid &&
-                                         vPatchMax.x >= vActiveInteractionBounds.x && vPatchMax.y >= vActiveInteractionBounds.y &&
-                                         vPatchMin.x <= vActiveInteractionBounds.z && vPatchMin.y <= vActiveInteractionBounds.w;
-        if (!bUseTessellation && bTouchesInteraction && pRenderData->m_uiLod <= 1)
-        {
-          const plUInt32 uiInteractionMultiplier = quality.m_Tier == plWaterQualityTier::Ultra ? 3u : 2u;
-          uiCellsPerSide = plMath::Min(uiCellsPerSide * uiInteractionMultiplier, 192u);
-        }
-      }
+      // On an edge that meets the next ring, the vertices move onto that ring's coarser vertices (see the vertex shader).
+      const bool bHasOuterRing = pRenderData->m_uiLod + 1u < quality.m_uiOceanRingCount;
+      const plUInt32 uiOuterMask = bHasOuterRing ? (pRenderData->m_uiOuterSeamMask & 0xFu) : 0u;
+      const plUInt32 uiRatio = bHasOuterRing ? plWaterGeometry::GetOceanSeamRatio(uiCellsPerSide, ringCells(pRenderData->m_uiLod + 1u)) : 1u;
+      uiSeams = (pRenderData->m_uiInnerSeamMask & 0xFu) | (uiOuterMask << 4) | (static_cast<plUInt32>(pRenderData->m_uiLod) << 8) | (uiRatio << 16);
     }
 
     if (pRenderData->m_hFiniteMesh.IsValid())
@@ -136,7 +135,6 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
     const plUInt32 uiActiveUnderwaterBodyId = pWaterPass != nullptr ? pWaterPass->GetActiveUnderwaterBodyId() : plInvalidIndex;
     constants.VolumeFilterParams = plVec4U32(pRenderData->m_uiBodyId, plInvalidIndex,
       uiActiveUnderwaterBodyId, uiActiveUnderwaterBodyId != plInvalidIndex ? 1u : 0u);
-    const plUInt32 uiSeams = (pRenderData->m_uiInnerSeamMask & 0xFu) | ((pRenderData->m_uiOuterSeamMask & 0xFu) << 4) | (static_cast<plUInt32>(pRenderData->m_uiLod) << 8);
     constants.ProfileParams = plVec4U32(uiProfile, uiProfile, uiProfileCount, uiSeams);
 
     plWaterJunctionConstants* junctionConstants = plRenderContext::GetConstantBufferData<plWaterJunctionConstants>(m_hJunctionConstants);
