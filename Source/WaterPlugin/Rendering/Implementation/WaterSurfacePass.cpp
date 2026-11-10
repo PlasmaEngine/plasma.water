@@ -1,5 +1,6 @@
 #include <WaterPlugin/WaterPluginPCH.h>
 
+#include <Foundation/Configuration/CVar.h>
 #include <Foundation/IO/TypeVersionContext.h>
 #include <RendererCore/Lights/ContactShadowDataProvider.h>
 #include <RendererCore/Pipeline/RenderPipeline.h>
@@ -37,6 +38,9 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterSurfacePass, 1, plRTTIDefaultAllocator<pl
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
+
+plCVarBool cvar_WaterDebugFailSurfacePass("Water.Debug.FailSurfacePass", false, plCVarFlags::Default,
+  "Makes the water surface pass report a failure while its render graph is built. For checking that the rest of the frame still renders.");
 
 namespace
 {
@@ -99,6 +103,8 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
     return plStatus(plFmt("DepthStencil: Not connected"));
   if (hResolvedDepth.IsInvalidated())
     return plStatus(plFmt("ResolvedDepth: Not connected"));
+  if (cvar_WaterDebugFailSurfacePass)
+    return plStatus(plFmt("Water.Debug.FailSurfacePass is set"));
 
   outputs[m_PinColor.m_uiOutputIndex].m_TextureHandle = hColor;
   outputs[m_PinDepthStencil.m_uiOutputIndex].m_TextureHandle = hDepthStencil;

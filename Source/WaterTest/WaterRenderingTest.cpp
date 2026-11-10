@@ -1,9 +1,11 @@
-#include <GameEngineTest/GameEngineTestPCH.h>
+#include <WaterTest/WaterTestPCH.h>
 
 #include <Core/ResourceManager/ResourceManager.h>
+#include <Foundation/Configuration/Plugin.h>
+#include <Foundation/IO/FileSystem/FileSystem.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
 #include <Foundation/System/EnvironmentVariableUtils.h>
-#include <GameEngineTest/Water/WaterRenderingTest.h>
+#include <WaterTest/WaterRenderingTest.h>
 #include <GameEngine/Interfaces/WaterWorldModule.h>
 #include <RendererCore/Components/SplineComponent.h>
 #include <RendererCore/Lights/ClusteredDataExtractor.h>
@@ -214,9 +216,49 @@ bool plWaterRenderingTestGameState::SetViewRenderMode(plViewRenderMode::Enum mod
   return true;
 }
 
-plWaterRenderingTestApplication::plWaterRenderingTestApplication()
-  : plGameEngineTestApplication("Water")
+plWaterTestApplication::plWaterTestApplication(const char* szProjectDirName)
+  : plGameEngineTestApplication(szProjectDirName)
 {
+}
+
+plWaterRenderingTestApplication::plWaterRenderingTestApplication()
+  : plWaterTestApplication("Water")
+{
+}
+
+static plString s_sSdkBinaryDirectory;
+static plString s_sPackagePluginDirectory;
+static plString s_sPackageAssetsDirectory;
+
+void plWaterTestApplication::SetPackageDirectories(plStringView sSdkBinaryDirectory, plStringView sPluginDirectory, plStringView sAssetsDirectory)
+{
+  s_sSdkBinaryDirectory = sSdkBinaryDirectory;
+  s_sPackagePluginDirectory = sPluginDirectory;
+  s_sPackageAssetsDirectory = sAssetsDirectory;
+}
+
+void plWaterTestApplication::Init_AddPluginSearchRoots()
+{
+  plGameEngineTestApplication::Init_AddPluginSearchRoots();
+
+  if (!s_sSdkBinaryDirectory.IsEmpty())
+  {
+    plPlugin::AddPluginSearchRoot(s_sSdkBinaryDirectory);
+  }
+  if (!s_sPackagePluginDirectory.IsEmpty())
+  {
+    plPlugin::AddPluginSearchRoot(s_sPackagePluginDirectory);
+  }
+}
+
+void plWaterTestApplication::Init_FileSystem_ConfigureDataDirs()
+{
+  plGameEngineTestApplication::Init_FileSystem_ConfigureDataDirs();
+
+  if (!s_sPackageAssetsDirectory.IsEmpty())
+  {
+    plFileSystem::AddDataDirectory(s_sPackageAssetsDirectory, "WaterTest", "plasma.water", plDataDirUsage::ReadOnly).AssertSuccess();
+  }
 }
 
 plUniquePtr<plGameStateBase> plWaterRenderingTestApplication::CreateGameState()

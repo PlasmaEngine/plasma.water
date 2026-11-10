@@ -1,4 +1,4 @@
-#include <GameEngineTest/GameEngineTestPCH.h>
+#include <WaterTest/WaterTestPCH.h>
 
 #include <RendererFoundation/Device/DeviceCapabilities.h>
 #include <RendererFoundation/Resources/ResourceFormats.h>

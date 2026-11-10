@@ -10,5 +10,6 @@ public class PlasmaWaterWorkspace : WorkspaceRules
         TargetNames.Add("WaterPlugin");
         TargetNames.Add("EnginePluginWater");
         TargetNames.Add("EditorPluginWater");
+        TargetNames.Add("WaterTest");
     }
 }
