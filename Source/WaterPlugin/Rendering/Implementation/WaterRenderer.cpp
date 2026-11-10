@@ -22,6 +22,9 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 plCVarInt cvar_WaterDebugJunctionPatches("Water.Debug.JunctionPatches", 0, plCVarFlags::Default,
   "Visualizes junction blend patches: 0 = off, 1 = blend gradient (occlusion clip active), 2 = blend gradient bypassing the occlusion clip.");
 
+plCVarBool cvar_WaterDebugNoTessellation("Water.Debug.NoTessellation", false, plCVarFlags::Default,
+  "Draws water without hull and domain stages on every tier. For finding out what tessellation costs.");
+
 plWaterRenderer::plWaterRenderer()
 {
   m_hShader = plResourceManager::LoadResource<plShaderResource>("Shaders/Water/WaterSurfaceModern.plShader");
@@ -62,7 +65,7 @@ void plWaterRenderer::RenderBatch(const plRenderViewContext& renderViewContext, 
     const bool bSurfaceGeometry = pRenderData->m_uiGeometryType == 0u || pRenderData->m_uiGeometryType == 1u ||
                                   pRenderData->m_uiGeometryType == 2u || pRenderData->m_uiGeometryType == 5u;
     const bool bUseTessellation = pQuality != nullptr && pQuality->m_Tier != plWaterQualityTier::Low &&
-                                  bTessellationSupported && bSurfaceGeometry;
+                                  bTessellationSupported && bSurfaceGeometry && !cvar_WaterDebugNoTessellation;
 
     plVec4 vActiveInteractionBounds = plVec4::MakeZero();
     const bool bInteractionBoundsValid = pWaterPass != nullptr && pWaterPass->GetActiveInteractionBounds(vActiveInteractionBounds);

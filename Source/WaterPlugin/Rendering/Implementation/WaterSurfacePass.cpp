@@ -42,6 +42,11 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 plCVarBool cvar_WaterDebugFailSurfacePass("Water.Debug.FailSurfacePass", false, plCVarFlags::Default,
   "Makes the water surface pass report a failure while its render graph is built. For checking that the rest of the frame still renders.");
 
+plCVarBool cvar_WaterDebugNoCaustics("Water.Debug.NoCaustics", false, plCVarFlags::Default,
+  "Leaves out the caustic field, trace and composite passes on every tier. For finding out what caustics cost.");
+plCVarBool cvar_WaterDebugNoSpectrum("Water.Debug.NoSpectrum", false, plCVarFlags::Default,
+  "Leaves out the wave spectrum and interaction passes on every tier. For finding out what they cost.");
+
 namespace
 {
   static plGALTextureCreationDescription MakeWaterTextureDesc(const plGALTextureCreationDescription& referenceDesc, plUInt32 uiWidth, plUInt32 uiHeight, plGALResourceFormat::Enum format)
@@ -125,7 +130,20 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
   const plUInt32 uiHeight = colorDesc.m_uiHeight;
   const plUInt32 uiArraySize = plMath::Max(colorDesc.m_uiArraySize, 1u);
 
-  const plWaterQualitySettings quality = plWaterQualitySettings::Resolve(plWaterQualitySettings::SelectTier(*this, m_Quality, viewData), ref_graph.GetDevice()->GetCapabilities());
+  plWaterQualitySettings quality = plWaterQualitySettings::Resolve(plWaterQualitySettings::SelectTier(*this, m_Quality, viewData), ref_graph.GetDevice()->GetCapabilities());
+  if (cvar_WaterDebugNoCaustics)
+  {
+    quality.m_bUseTransmittedCaustics = false;
+    quality.m_bUseReflectedCaustics = false;
+    quality.m_bUseUnderwaterCaustics = false;
+  }
+  if (cvar_WaterDebugNoSpectrum)
+  {
+    quality.m_bUseSpectrum = false;
+    quality.m_uiSpectrumCascadeCount = 0;
+    quality.m_uiSpectrumResolution = 0;
+    quality.m_uiInteractionAtlasSize = 0;
+  }
 
   const plGALTextureCreationDescription waterDepthDesc = MakeWaterTextureDesc(colorDesc, uiWidth, uiHeight, plGALResourceFormat::RFloat);
   const plRenderGraphTextureHandle hWaterDepth = ref_graph.CreateTexture(waterDepthDesc);

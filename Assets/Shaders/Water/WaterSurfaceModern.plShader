@@ -532,6 +532,36 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
   return 0.0;
 }
 
+// How much of the sun reaches a point on the water surface: the engine's shadow map (virtual pages or cascades) and
+// its cloud shadows, looked up at the surface's own world position. Contact shadows are left out on purpose: they
+// are traced from the opaque depth buffer, so on a water pixel they describe the bed below, not the surface.
+float EvaluateWaterSunShadow(float3 worldPosition, float3 surfaceNormal, float3 screenPosition, out float3 out_debugColor)
+{
+  out_debugColor = float3(1.0, 0.0, 1.0); // magenta: the view has no directional light
+  if (BrightestDirectionalLightIndex >= NumLights)
+    return 1.0;
+
+  const plPerLightData lightData = perLightDataBuffer[BrightestDirectionalLightIndex];
+  const uint type = (lightData.colorAndType >> 24) & 0xFF;
+  if (type != LIGHT_TYPE_DIR)
+    return 1.0;
+
+  const float3 lightVector = normalize(RGB10ToFloat3(lightData.direction) * 2.0 - 1.0);
+  out_debugColor = float3(1.0, 1.0, 0.0); // yellow: the sun casts no shadows
+  if (lightData.shadowDataOffsetAndFadeOut == 0)
+    return SampleCloudShadowTerm(worldPosition);
+
+  const float noise = InterleavedGradientNoise(screenPosition.xy);
+  float2 randomAngle;
+  sincos(noise * 2.0 * PI, randomAngle.x, randomAngle.y);
+  const float2x2 randomRotation = {randomAngle.x, -randomAngle.y, randomAngle.y, randomAngle.x};
+  float subsurfaceShadow = 1.0;
+  // Green where the shadow map covers the point, red where it does not (the lookup then answers "lit").
+  const float shadowTerm = saturate(CalculateShadowTerm(worldPosition, surfaceNormal, lightVector, 1.0, type, lightData.shadowDataOffsetAndFadeOut,
+    noise, randomRotation, 1.0, subsurfaceShadow, out_debugColor));
+  return shadowTerm;
+}
+
 void ComputeWaterDepths(PS_IN input, uint eyeIndex, out float surfaceLinearDepth, out float opaqueLinearDepth)
 {
   const float opaqueDepth = LoadWaterOpaqueDepth(input.Position.xy, eyeIndex);
@@ -818,6 +848,8 @@ float4 main(PS_IN input) : SV_Target0
   const float perceptualRoughness = saturate(max(absorptionAndRoughness.w, 0.025) + slopeVariance * 0.35);
   plMaterialData materialData = (plMaterialData)0;
   materialData.worldPosition = input.WorldPosition;
+  // The engine's lights look their shadows up here. Left at zero, every water pixel took the shadow of the world origin.
+  materialData.shadowPosition = input.WorldPosition;
   materialData.worldNormal = normal;
   materialData.vertexNormal = cameraOnNormalSide ? normalize(input.Normal) : -normalize(input.Normal);
   materialData.diffuseColor = foamColor.rgb;
@@ -944,7 +976,16 @@ float4 main(PS_IN input) : SV_Target0
         return float4(diffuseIrradiance * 0.2, 1.0); // analytic irradiance (scaled)
       if (debugMode == 14u)
         return float4(litTint, 1.0); // authored tint after lighting
-      return float4(MainLightColorIntensity.rgb * 0.1, 1.0); // 15+: raw main light (scaled)
+      if (debugMode == 15u)
+        return float4(MainLightColorIntensity.rgb * 0.1, 1.0); // raw main light (scaled)
+      if (debugMode == 16u || debugMode == 17u)
+      {
+        // 16: the sun's shadow at the water surface (white is lit). 17: whether the shadow map covers the surface.
+        float3 coverage;
+        const float sunShadow = EvaluateWaterSunShadow(input.WorldPosition, float3(0.0, 0.0, 1.0), input.Position.xyw, coverage);
+        return float4(debugMode == 16u ? sunShadow.xxx : coverage, 1.0);
+      }
+      return float4(PreExpose(engineLighting.specularLight), 1.0); // 18+: the engine's direct specular
     }
   }
 #endif

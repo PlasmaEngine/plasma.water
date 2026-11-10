@@ -26,11 +26,15 @@ public:
     const char* m_szName;
     plVec3 m_vPosition;
     plVec3 m_vTarget;
+    plInt32 m_iDebugMode = 0; ///< Water.Debug.JunctionPatches while the shot is taken: a shading term instead of the picture.
   };
 
   plResult SetupScene(Scene scene, plUInt32 uiVariant = 0);
   plArrayPtr<const Shot> GetShots(Scene scene) const;
   void SetShot(const Shot& shot);
+
+  /// False if a body of the scene has no geometry or a junction did not resolve. Logs which.
+  bool CheckSceneIsValid();
 
   /// Saves the last screenshot as <output>/Gallery/<name>.png.
   plResult SaveShot(plStringView sName);
@@ -41,11 +45,15 @@ protected:
 
 private:
   plGameObject* AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color, const plQuat& qRotation = plQuat::MakeIdentity());
-  plGameObject* AddWaterBody(const char* szName, plWaterBodyType::Enum type, const plWaterProfileResourceHandle& hProfile, plArrayPtr<const plVec3> spline, bool bClosed);
+  /// A height field over a rectangle, as sand below 0.6 m and grass above. Gives water real banks and a real bed.
+  void AddTerrain(const char* szName, const plVec2& vMin, const plVec2& vMax, float fCellSize, const plDelegate<float(const plVec2&)>& height);
+  plGameObject* AddWaterBody(const char* szName, plWaterBodyType::Enum type, const plWaterProfileResourceHandle& hProfile, plArrayPtr<const plVec3> spline, bool bClosed, float fHeight = 0.0f);
   void AddJunction(plGameObject* pRiver, plGameObject* pOther, const plVec3& vPosition, bool bRiverEnd);
   void AddSunAndSky(const plVec3& vToSun, float fLux);
 
   plMeshResourceHandle m_hBoxMesh;
+  plDynamicArray<plMeshResourceHandle> m_TerrainMeshes;
+  plUInt32 m_uiTerrainCounter = 0;
   plUInt32 m_uiProfileCounter = 0;
 };
 
@@ -68,6 +76,7 @@ protected:
     ShadedCove,
     RiverNetwork,
     RiverBend,
+    TierTiming,
   };
 
   virtual void SetupSubTests() override;
@@ -77,6 +86,7 @@ protected:
 private:
   plTestAppRun RunShots(plStringView sPrefix);
   plTestAppRun RunMainPipelineDrawsWater();
+  plTestAppRun RunTierTiming();
 
   plWaterGalleryApplication* m_pOwnApplication = nullptr;
   plWaterGalleryApplication::Scene m_Scene = plWaterGalleryApplication::Scene::OpenOcean;
@@ -84,6 +94,9 @@ private:
   plUInt32 m_uiShot = 0;
   plInt32 m_iShotFrame = 0;
   plInt32 m_iPhase = 0;
+  plStringBuilder m_Timing;
+  plDynamicArray<float> m_TimingSamples;
+  plDynamicArray<float> m_GpuTimingSamples;
   plImage m_WithWater;
   plImage m_WithoutInjections;
 };
