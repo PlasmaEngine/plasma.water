@@ -8,7 +8,7 @@
 
 namespace
 {
-  static bool IsType(const plDocumentObject* pObject, plStringView sTypeName)
+  static bool IsObjectOfType(const plDocumentObject* pObject, plStringView sTypeName)
   {
     return pObject != nullptr && pObject->GetType()->GetTypeName() == sTypeName;
   }
@@ -19,7 +19,7 @@ namespace
       return "<missing>";
 
     const plDocumentObject* pNamedObject = pObject;
-    while (pNamedObject != nullptr && !IsType(pNamedObject, "plGameObject"))
+    while (pNamedObject != nullptr && !IsObjectOfType(pNamedObject, "plGameObject"))
       pNamedObject = pNamedObject->GetParent();
 
     if (pNamedObject != nullptr)
@@ -32,14 +32,14 @@ namespace
     return pObject->GetType()->GetTypeName();
   }
 
-  static const plDocumentObject* FindOwner(const plDocumentObject* pObject)
+  static const plDocumentObject* FindOwnerObject(const plDocumentObject* pObject)
   {
-    while (pObject != nullptr && !IsType(pObject, "plGameObject"))
+    while (pObject != nullptr && !IsObjectOfType(pObject, "plGameObject"))
       pObject = pObject->GetParent();
     return pObject;
   }
 
-  static const plDocumentObject* FindComponent(const plDocumentObject* pOwner, plStringView sTypeName)
+  static const plDocumentObject* FindComponentObject(const plDocumentObject* pOwner, plStringView sTypeName)
   {
     if (pOwner == nullptr)
       return nullptr;
@@ -54,21 +54,21 @@ namespace
         continue;
 
       const plDocumentObject* pComponent = pOwner->GetDocumentObjectManager()->GetObject(value.Get<plUuid>());
-      if (IsType(pComponent, sTypeName))
+      if (IsObjectOfType(pComponent, sTypeName))
         return pComponent;
     }
 
     return nullptr;
   }
 
-  static const plDocumentObject* FindChildByName(const plDocumentObject* pOwner, plStringView sName)
+  static const plDocumentObject* FindChildObjectByName(const plDocumentObject* pOwner, plStringView sName)
   {
     if (pOwner == nullptr)
       return nullptr;
 
     for (const plDocumentObject* pChild : pOwner->GetChildren())
     {
-      if (!IsType(pChild, "plGameObject"))
+      if (!IsObjectOfType(pChild, "plGameObject"))
         continue;
 
       plVariant value = pChild->GetTypeAccessor().GetValue("Name");
@@ -138,7 +138,7 @@ namespace
 
   static void ValidateBody(const plDocumentObject* pBody, plDynamicArray<plWaterValidationIssue>& out_issues)
   {
-    const plDocumentObject* pOwner = FindOwner(pBody);
+    const plDocumentObject* pOwner = FindOwnerObject(pBody);
     const plString sName = GetObjectName(pBody);
 
     const plVariant profile = pBody->GetTypeAccessor().GetValue("Profile");
@@ -149,7 +149,7 @@ namespace
     if (iWaterType == 0)
       return; // Ocean does not require a spline.
 
-    const plDocumentObject* pSpline = FindComponent(pOwner, "plSplineComponent");
+    const plDocumentObject* pSpline = FindComponentObject(pOwner, "plSplineComponent");
     if (pSpline == nullptr)
     {
       AddIssue(out_issues, plWaterValidationIssue::Severity::Error, pBody, plFmt("Water body '{}' requires a sibling plSplineComponent.", sName));
@@ -187,7 +187,7 @@ namespace
       else
         continue;
 
-      const plDocumentObject* pNode = FindChildByName(pOwner, sNodeName);
+      const plDocumentObject* pNode = FindChildObjectByName(pOwner, sNodeName);
       if (pNode == nullptr)
       {
         AddIssue(out_issues, plWaterValidationIssue::Severity::Error, pSpline,
@@ -204,7 +204,7 @@ namespace
 
       if (iWaterType == 1)
       {
-        const plDocumentObject* pPoint = FindComponent(pNode, "plWaterSplinePointComponent");
+        const plDocumentObject* pPoint = FindComponentObject(pNode, "plWaterSplinePointComponent");
         if (pPoint == nullptr)
         {
           AddIssue(out_issues, plWaterValidationIssue::Severity::Error, pNode,
@@ -326,7 +326,7 @@ namespace
       const auto* pManager = pJunction->GetDocumentObjectManager();
       const plDocumentObject* pBodyAOwner = pManager->GetObject(bodyAGuid);
       const plDocumentObject* pBodyBOwner = pManager->GetObject(bodyBGuid);
-      if (FindComponent(pBodyAOwner, "plWaterBodyComponent") == nullptr || FindComponent(pBodyBOwner, "plWaterBodyComponent") == nullptr)
+      if (FindComponentObject(pBodyAOwner, "plWaterBodyComponent") == nullptr || FindComponentObject(pBodyBOwner, "plWaterBodyComponent") == nullptr)
         AddIssue(out_issues, plWaterValidationIssue::Severity::Error, pJunction, "Water junction contains a broken or non-water body reference.");
     }
 
@@ -350,21 +350,21 @@ void plWaterEditorValidation::ValidateDocument(const plDocument* pDocument, plDy
 
   for (const plDocumentObject* pObject : objects)
   {
-    if (IsType(pObject, "plWaterBodyComponent"))
+    if (IsObjectOfType(pObject, "plWaterBodyComponent"))
     {
       ValidateBody(pObject, out_issues);
     }
-    else if (IsType(pObject, "plWaterJunctionComponent"))
+    else if (IsObjectOfType(pObject, "plWaterJunctionComponent"))
     {
       ValidateJunction(pObject, out_issues);
     }
-    else if (IsType(pObject, "plWaterExclusionVolumeComponent"))
+    else if (IsObjectOfType(pObject, "plWaterExclusionVolumeComponent"))
     {
       const plVariant extents = pObject->GetTypeAccessor().GetValue("Extents");
       if (!extents.IsA<plVec3>() || extents.Get<plVec3>().x <= 0.0f || extents.Get<plVec3>().y <= 0.0f || extents.Get<plVec3>().z <= 0.0f)
         AddIssue(out_issues, plWaterValidationIssue::Severity::Error, pObject, "Water exclusion volume Extents must be positive.");
     }
-    else if (IsType(pObject, "plOceanComponent"))
+    else if (IsObjectOfType(pObject, "plOceanComponent"))
     {
       AddIssue(out_issues, plWaterValidationIssue::Severity::Warning, pObject,
         plFmt("Legacy ocean '{}' is still present. Use Convert Legacy Ocean to Water Body.", GetObjectName(pObject)));
