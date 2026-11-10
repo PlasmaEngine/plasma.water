@@ -21,16 +21,47 @@ Configs/                build rules for building against an installed engine SDK
 Branding/               icon and banner
 ```
 
-## What ships with the engine, not here
+## How water gets into a render pipeline
 
-The water shaders (`Data/Base/Shaders/Water/`, `WaterSurface.plShader`,
-`UnderwaterPostProcess.plShader`), the default Ocean/River/Lake profiles under `Data/Plugins/Water/`,
-and the editor string table all stay in the engine.
+Nobody edits a pipeline asset. When the plugin starts it registers two pipeline injections with the engine
+(`plRenderPipelineInjections`, in `Source/WaterPlugin/Startup.cpp`):
 
-They stay there because `Mount` is declared in package manifests but nothing consumes it yet, so
-content shipped inside a package is not reachable at run time. Water without its shaders is not
-water, so relocating them waits until mounts are wired up. Installing this package needs nothing
-further.
+| Injection | Point | What it does |
+| --- | --- | --- |
+| `plasma.water/Surface` | `BeforeTransparent` | `plWaterSurfacePass`: wave simulation, caustics and the surface itself, in front of the transparent pass. Adds `plWaterFrameDataExtractor`. |
+| `plasma.water/Underwater` | `AfterTransparentResolved` | `plWaterUnderwaterPass`: fog, distortion and light shafts while the camera is under water. |
+
+The engine places the passes in every pipeline that has a transparent pass, undoes the wiring if it does not hold,
+and bypasses a pass that fails to build, so the rest of the frame still renders. Pipeline assets never name a water
+type, so they load without this package.
+
+- **No water, no cost.** Water bodies report `PL_WATER_CONTENT_FLAG_SURFACES` while they are extracted. Without it
+  both passes hand their inputs on and create nothing.
+- **Quality.** The cvar `Water.Quality` (0 Low, 1 Balanced, 2 High, 3 Ultra) sets the tier. Reflection and
+  render-target views are held at Low.
+- **Hand-placed passes win.** A pipeline whose asset already contains a `plWaterSurfacePass` keeps it, with the
+  Quality property of its node, and gets no injection.
+- **Switching it off.** Add `plasma.water/Surface;plasma.water/Underwater` to the cvar
+  `Rendering.Pipeline.Injections.Disabled`, or set `Rendering.Pipeline.Injections` to false for every package.
+- **Pipelines without a transparent pass** (the mobile pipeline) get no water. The log says so once per pipeline.
+
+This needs an engine with `plRenderPipelineInjections`. On an older engine the plugin does not build.
+
+## What comes from the engine, not from here
+
+The shaders (`Assets/Shaders/Water/`), their permutation variables (`Assets/Shaders/PermutationVars/`) and the
+default Ocean, River and Lake profiles (`Assets/Water/DefaultProfiles/`) ship in this package and are mounted as the
+data directory `plasma.water`.
+
+Still taken from the engine's `Data/Base`:
+
+- the default normal map and foam texture the profiles reference (`Textures/WaterBump`, `Textures/Foam`),
+- the constant-buffer and lighting headers the water shaders include,
+- the editor string table (`Data/Tools/plEditor/Localization/en/WaterPlugin.txt`).
+
+The engine also still carries the legacy `Materials/WaterSurface.plShader`, `Pipeline/UnderwaterPostProcess.plShader`
+and its own copies of the `WATER_*` permutation variables. They belong to the deprecated `plOceanComponent` and
+`plUnderwaterPass` and can go when those do.
 
 ## Dependencies
 

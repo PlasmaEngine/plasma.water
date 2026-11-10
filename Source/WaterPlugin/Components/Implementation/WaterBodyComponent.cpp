@@ -7,10 +7,13 @@
 #include <Foundation/SimdMath/SimdConversion.h>
 #include <RendererCore/Components/SplineComponent.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
+#include <RendererCore/Pipeline/RenderPipeline.h>
 #include <RendererCore/Pipeline/View.h>
 #include <WaterPlugin/Components/WaterBodyComponent.h>
 #include <WaterPlugin/Components/WaterSplinePointComponent.h>
+#include <WaterPlugin/Rendering/WaterQuality.h>
 #include <WaterPlugin/Rendering/WaterRenderData.h>
+#include <WaterPlugin/Rendering/WaterSurfacePass.h>
 #include <WaterPlugin/World/WaterWorldModule.h>
 
 namespace
@@ -114,6 +117,41 @@ namespace
     out_renderData.m_uiGeometryType = uiGeometryType;
     out_renderData.m_uiCellsPerSide = uiCellsPerSide;
     out_renderData.m_uiPrimitiveCount = uiCellsPerSide * uiCellsPerSide * 2;
+  }
+
+  /// Water is drawn by plWaterSurfacePass, which the engine places in every pipeline that has a transparent pass.
+  /// A pipeline without one (the mobile pipeline, or a custom pipeline) extracts water and never draws it. That used
+  /// to be silent. Says so once per pipeline, for the views a person looks at.
+  void WarnIfViewCannotDrawWater(const plView& view)
+  {
+    const plCameraUsageHint::Enum usage = view.GetCameraUsageHint();
+    if (usage != plCameraUsageHint::MainView && usage != plCameraUsageHint::EditorView)
+      return;
+
+    const plRenderPipeline* pPipeline = view.GetRenderPipeline();
+    if (pPipeline == nullptr)
+      return;
+
+    // Extraction runs for several views at once. The last few pipelines that were looked at are remembered, so the
+    // pass list is walked once per pipeline and not once per water body and frame.
+    static plMutex s_Mutex;
+    static const plRenderPipeline* s_Checked[8] = {};
+    static plUInt32 s_uiNext = 0;
+    {
+      PL_LOCK(s_Mutex);
+      for (const plRenderPipeline* pChecked : s_Checked)
+      {
+        if (pChecked == pPipeline)
+          return;
+      }
+      s_Checked[s_uiNext] = pPipeline;
+      s_uiNext = (s_uiNext + 1) % PL_ARRAY_SIZE(s_Checked);
+    }
+
+    if (!pPipeline->HasActivePassOfType(plGetStaticRTTI<plWaterSurfacePass>()))
+    {
+      plLog::Warning("Water is in view '{}', but the view's render pipeline has no water surface pass, so no water is drawn there. Either the pipeline has no transparent pass for the water pass to go in front of (the mobile pipeline, for example), or pipeline injections are switched off (cvar Rendering.Pipeline.Injections, or 'plasma.water/Surface' in Rendering.Pipeline.Injections.Disabled).", view.GetName());
+    }
   }
 
   void FillSecondaryProfile(plWaterRenderData& out_renderData, const plWaterProfileResourceDescriptor& profile,
@@ -447,6 +485,10 @@ void plWaterBodyComponent::OnMsgExtractRenderData(plMsgExtractRenderData& msg) c
   plWaterBodySnapshot snapshot;
   if (pModule == nullptr || !pModule->TryGetBodySnapshot(m_BodyId, snapshot) || !snapshot.m_bGeometryValid)
     return;
+
+  // The water passes build their targets and run the wave simulation only while this is reported.
+  msg.AddContentFlags(PL_WATER_CONTENT_FLAG_SURFACES);
+  WarnIfViewCannotDrawWater(*msg.m_pView);
 
   const plVec3 cameraPosition = msg.m_pView->GetCullingCamera()->GetPosition();
   const float fSimulationTime = static_cast<float>(pModule->GetFixedSimulationStep().GetSeconds() * pModule->GetSimulationTick());

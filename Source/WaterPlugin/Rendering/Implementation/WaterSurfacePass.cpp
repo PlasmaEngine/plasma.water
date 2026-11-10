@@ -103,12 +103,23 @@ plStatus plWaterSurfacePass::AddRenderPasses(const plViewData& viewData, const p
   outputs[m_PinColor.m_uiOutputIndex].m_TextureHandle = hColor;
   outputs[m_PinDepthStencil.m_uiOutputIndex].m_TextureHandle = hDepthStencil;
 
+  // No water body was extracted for this view (recently): no targets, no wave simulation, no draws. The pass is in
+  // every pipeline with a transparent pass once the package is installed, so a scene without water must not pay for it.
+  // The content flags are part of the graph's fingerprint: the graph is rebuilt when water comes into view.
+  if ((GetPipeline()->GetContentFlags() & PL_WATER_CONTENT_FLAG_SURFACES) == 0)
+  {
+    // Clear the handles but keep the connectivity, or a later build could not hand a texture through the connection.
+    outputs[m_PinWaterDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterDepth.m_uiOutputIndex].m_Connectivity);
+    outputs[m_PinWaterExitDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterExitDepth.m_uiOutputIndex].m_Connectivity);
+    return plStatus(PL_SUCCESS);
+  }
+
   const plGALTextureCreationDescription colorDesc = ref_graph.GetTextureDesc(hColor);
   const plUInt32 uiWidth = colorDesc.m_uiWidth;
   const plUInt32 uiHeight = colorDesc.m_uiHeight;
   const plUInt32 uiArraySize = plMath::Max(colorDesc.m_uiArraySize, 1u);
 
-  const plWaterQualitySettings quality = plWaterQualitySettings::Resolve(m_Quality, ref_graph.GetDevice()->GetCapabilities());
+  const plWaterQualitySettings quality = plWaterQualitySettings::Resolve(plWaterQualitySettings::SelectTier(*this, m_Quality, viewData), ref_graph.GetDevice()->GetCapabilities());
 
   const plGALTextureCreationDescription waterDepthDesc = MakeWaterTextureDesc(colorDesc, uiWidth, uiHeight, plGALResourceFormat::RFloat);
   const plRenderGraphTextureHandle hWaterDepth = ref_graph.CreateTexture(waterDepthDesc);
@@ -577,8 +588,9 @@ plStatus plWaterSurfacePass::AddRenderPassesInactive(const plViewData& viewData,
 
   outputs[m_PinColor.m_uiOutputIndex] = inputs[m_PinColor.m_uiInputIndex];
   outputs[m_PinDepthStencil.m_uiOutputIndex] = inputs[m_PinDepthStencil.m_uiInputIndex];
-  outputs[m_PinWaterDepth.m_uiOutputIndex] = plRenderPipelinePinConnection();
-  outputs[m_PinWaterExitDepth.m_uiOutputIndex] = plRenderPipelinePinConnection();
+  // Keep the connectivity: a connection without it drops the texture the pass hands over once it is active again.
+  outputs[m_PinWaterDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterDepth.m_uiOutputIndex].m_Connectivity);
+  outputs[m_PinWaterExitDepth.m_uiOutputIndex] = plRenderPipelinePinConnection(outputs[m_PinWaterExitDepth.m_uiOutputIndex].m_Connectivity);
   return plStatus(PL_SUCCESS);
 }
 

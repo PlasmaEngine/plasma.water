@@ -63,6 +63,14 @@ plStatus plWaterUnderwaterPass::AddRenderPasses(const plViewData& viewData, cons
   if (hDepth.IsInvalidated())
     return plStatus(plFmt("Depth: Not connected"));
 
+  // No water body was extracted for this view (recently): the camera cannot be under water, so the image is handed
+  // on as it is and no target is created. See plWaterSurfacePass.
+  if ((GetPipeline()->GetContentFlags() & PL_WATER_CONTENT_FLAG_SURFACES) == 0)
+  {
+    outputs[m_PinOutput.m_uiOutputIndex].m_TextureHandle = hColor;
+    return plStatus(PL_SUCCESS);
+  }
+
   const plGALTextureCreationDescription inputDesc = ref_graph.GetTextureDesc(hColor);
   plGALTextureCreationDescription outputDesc = inputDesc;
   outputDesc.m_bAllowRenderTargetView = true;
@@ -72,7 +80,7 @@ plStatus plWaterUnderwaterPass::AddRenderPasses(const plViewData& viewData, cons
 
   const bool bHasExitDepth = !hWaterExitDepth.IsInvalidated();
   const plRenderGraphTextureHandle hExitDepthOrSceneDepth = bHasExitDepth ? hWaterExitDepth : hDepth;
-  const plWaterQualitySettings quality = plWaterQualitySettings::Resolve(m_Quality, ref_graph.GetDevice()->GetCapabilities());
+  const plWaterQualitySettings quality = plWaterQualitySettings::Resolve(plWaterQualitySettings::SelectTier(*this, m_Quality, viewData), ref_graph.GetDevice()->GetCapabilities());
 
   auto pass = ref_graph.AddGraphicsPass("Water Underwater Composite");
   pass.AddColorTarget(hOutput);
