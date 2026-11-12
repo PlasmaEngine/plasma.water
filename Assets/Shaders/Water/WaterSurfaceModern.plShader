@@ -559,15 +559,18 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
   if (dot(reflectionDirection, cameraForward) <= 1.0e-3)
     return 0.0;
 
-  const float maxTraceDistance = lerp(55.0, 18.0, saturate(perceptualRoughness));
+  // A lake reflects its far shore, which is as far from the water as the water is from the camera, or farther: the
+  // range grows with the distance of the surface (55 m was the near shore only, and a low camera saw no trees in it).
+  const float maxTraceDistance = lerp(clamp(surfaceLinearDepth * 3.0 + 40.0, 55.0, 400.0), 18.0, saturate(perceptualRoughness));
   float previousDistance = 0.08;
   // The visible water surface is already in front of the opaque depth at the ray origin. Treat the
   // self-intersection offset as the initial front sample so nearby reflectors remain bracketed.
   bool hasFrontSample = true;
-  const uint stepCount = clamp((uint)WaterQualityParams.x, 1u, 8u);
+  // Twice the tier's steps over the longer range; the jitter and the temporal filter take care of the rest.
+  const uint stepCount = clamp((uint)WaterQualityParams.x * 2u, 1u, 16u);
 
-  [unroll]
-  for (uint stepIndex = 0u; stepIndex < 8u; ++stepIndex)
+  [loop]
+  for (uint stepIndex = 0u; stepIndex < 16u; ++stepIndex)
   {
     if (stepIndex >= stepCount)
       break;
@@ -636,7 +639,9 @@ float3 TraceWaterScreenSpaceReflection(float3 worldPosition, float3 reflectionDi
       const float edgeValidity = smoothstep(0.0, 0.045, edgeDistance);
       const float depthValidity = 1.0 - smoothstep(hitThickness, hitThickness * 5.0, abs(hitDelta));
       const float roughnessValidity = 1.0 - smoothstep(0.22, 0.65, perceptualRoughness);
-      const float grazingValidity = smoothstep(0.025, 0.12, noV);
+      // A calm lake seen from eye height is grazing almost everywhere (noV 0.03 at 50 m from a camera 1.6 m up), and that
+      // is where it mirrors the shore. Only the last fraction of a degree is faded, where the projection is unstable.
+      const float grazingValidity = smoothstep(0.0, 0.015, noV);
       // Do not let a depth discontinuity in front of this water pixel become an immediate false hit.
       const float receiverValidity = smoothstep(surfaceLinearDepth * 0.25, surfaceLinearDepth * 0.75, hitDepth);
       reflectionValidity = edgeValidity * depthValidity * roughnessValidity * grazingValidity * receiverValidity;
@@ -1065,25 +1070,29 @@ float4 main(PS_IN input) : SV_Target0
   // well above the horizon on average: slopes that would show the horizon itself are hidden behind the waves in front
   // of them. And a probe's horizon is the worst of it, a blur of sky with whatever lies below, which in a sky-light
   // probe is the bare ground without any water on it. So the direction is lifted, more the rougher the surface is.
+  // The mirror image is taken about a flattened normal: small waves wobble the reflection of the shore rather than
+  // scatter it over the sky (the roughness above still widens the lobe).
+  const float3 reflectionNormal = normalize(lerp(levelNormal, normal, 0.5));
   plMaterialData reflectionMaterialData = materialData;
   if (cameraOnNormalSide)
   {
-    float3 r = reflect(-viewDirection, normal);
+    float3 r = reflect(-viewDirection, reflectionNormal);
     if (r.z < 0.0)
       r.z = -r.z * 0.5;
-    r.z = max(r.z, 0.2 + perceptualRoughness * 0.6);
+    // Only rough water is lifted towards the sky; calm water reflects the probe's horizon, the shore.
+    r.z = max(r.z, saturate(perceptualRoughness - 0.1) * 0.7);
     r = normalize(r);
     reflectionMaterialData.worldNormal = normalize(r + viewDirection);
   }
   const float3 probeRadiance = ComputeReflection(reflectionMaterialData, viewDirection, clusterData, input.Position.xyw);
-  const float3 giSpecularRadiance = SampleGIForwardSpecular(input.Position.xyw, input.WorldPosition) * GISpecularStrength;
-  const float giSpecularValid = (GIForwardEnabled != 0 && GIForwardReflectionsEnabled != 0) ? 1.0 : 0.0;
-  const float3 stableEnvironmentRadiance = lerp(probeRadiance, giSpecularRadiance, giSpecularValid);
+  // The GI specular texture is resolved for the opaque surface behind each pixel - here the bed, with the bed's normal
+  // and roughness - so it is not the water's reflection. The water keeps the probe until GI resolves the surface itself.
+  const float3 stableEnvironmentRadiance = probeRadiance;
   // Reflection parameters are energy weights. Clamping them prevents an authored multiplier from producing
   // more reflected radiance than arrives at the interface.
   const float reflectionStrength = saturate(opticalParams.x);
   const float environmentReflectionWeight = reflectionStrength * saturate(opticalParams.y);
-  float3 reflectionDirection = reflect(-viewDirection, normal);
+  float3 reflectionDirection = reflect(-viewDirection, reflectionNormal);
   // A ray that leaves a wave downwards meets water again, and what it shows in the end is sky from lower down, not
   // the ground half of a probe. Without a second bounce, the ray is turned back up: seen from above, far water near
   // the horizon reflected the probe's floor as a brown band.
@@ -1131,9 +1140,9 @@ float4 main(PS_IN input) : SV_Target0
     if (debugMode >= 3u)
     {
       if (debugMode == 3u)
-        return float4(transmittedColor, 1.0);
+        return float4(PreExpose(transmittedColor), 1.0);
       if (debugMode == 4u)
-        return float4(reflectionLighting, 1.0);
+        return float4(PreExpose(reflectionLighting), 1.0);
       if (debugMode == 5u)
         return float4(fresnel.xxx, 1.0);
       if (debugMode == 6u)
