@@ -498,7 +498,9 @@ plResult plWaterGeometry::TriangulateLakePolygon(plArrayPtr<const plVec3> cleane
     }
     if (splitEdges.IsEmpty())
       break;
-    if (out_vertices.GetCount() + splitEdges.GetCount() > s_uiMaximumFiniteWaterVertices)
+    // The volume below the surface has a bottom vertex for every surface vertex and walls along the shore, and it has to
+    // fit the same budget: the surface keeps to a little less than half of it.
+    if (out_vertices.GetCount() + splitEdges.GetCount() > s_uiMaximumFiniteWaterVertices * 9 / 20)
     {
       // Preserve the finest complete topology that fits the finite-water budget. Detailed interaction meshes
       // should degrade gracefully on very large lakes rather than making the entire water body disappear.
