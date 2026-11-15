@@ -190,6 +190,12 @@ public:
   virtual void AddInteraction(plWaterInteraction interaction) override;
   virtual plUInt64 CopyInteractionsSince(plUInt64 uiAfterSequence, plDynamicArray<plWaterInteraction>& out_interactions) const override;
 
+  /// Finds the first crossing of the deterministic CPU surface along a normalized ray, in either direction.
+  /// Searches body bounds in at most 10 cm steps and refines crossings to 1 mm. GPU-only ripples/FFT are excluded,
+  /// as with TrySampleSurface. Features narrower than the search step are not guaranteed to intersect.
+  bool RaycastSurface(const plVec3& vStart, const plVec3& vDirection, float fDistance,
+    plWaterSurfaceResult& out_result, float& out_fDistance) const;
+
   /// \brief Sets the water's clock (to zero unless told otherwise) and drops what interactions there are. Waves are a
   /// function of this clock, so a test that compares pictures calls it to make a scene look the same whatever ran
   /// before it, and a test of what water looks like after ten minutes sets it to ten minutes.

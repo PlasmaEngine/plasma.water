@@ -98,6 +98,18 @@ level, wider than the shore, or the end already has a junction), and both bodies
 - `Water.Debug.JunctionPatches` 3 and up show one term of the shading instead of the picture. 16 is the sun's shadow
   at the surface, 17 whether the shadow map covers it.
 
+## Gameplay surface hits
+
+`plWaterWorldModule::RaycastSurface` finds the nearest CPU surface crossing along a normalized ray, including
+shots from below. Pass the nearest solid physics hit as the distance limit to prevent splashes through walls.
+The query clips to each body's bounds, samples at up to 10 cm intervals and refines a crossing to 1 mm at one
+simulation tick. Exclusions and junctions participate. Sub-10-cm features and GPU-only ripple/FFT detail are
+outside this query's precision contract. Submit a `plWaterInteraction` with the returned body and position to
+produce the surface ripple; a game can spawn its own splash particles at the same position.
+
+`plWaterInteractorComponent` on a character provides entry splashes and movement wakes. Swimming remains the
+character controller's responsibility; the interactor only reports immersion and emits disturbances.
+
 ## Things that go wrong
 
 - **A river is missing a piece in a tight bend.** It bends more tightly than it is wide. The log names the body and

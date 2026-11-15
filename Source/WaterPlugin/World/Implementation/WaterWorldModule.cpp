@@ -1264,6 +1264,101 @@ bool plWaterWorldModule::TrySampleSurfaceAtTick(const plWaterSurfaceQuery& query
   return true;
 }
 
+bool plWaterWorldModule::RaycastSurface(const plVec3& vStart, const plVec3& vDirection, float fDistance,
+  plWaterSurfaceResult& out_result, float& out_fDistance) const
+{
+  if (!vStart.IsValid() || !vDirection.IsValid() || !vDirection.IsNormalized(0.001f) ||
+      !plMath::IsFinite(fDistance) || fDistance <= 0.0f)
+    return false;
+
+  PL_LOCK(m_Mutex);
+  bool bHit = false;
+  float fClosest = fDistance;
+  for (const BodySlot& slot : m_Bodies)
+  {
+    if (!slot.m_bInUse || !slot.m_Data.m_bGeometryValid || !slot.m_Data.m_WorldBounds.IsValid())
+      continue;
+
+    // Clip the search to this body's bounds without copying meshes or querying unrelated bodies at each step.
+    const auto& bounds = slot.m_Data.m_WorldBounds;
+    float fBegin = 0.0f;
+    float fEnd = fClosest;
+    for (plUInt32 axis = 0; axis < 3; ++axis)
+    {
+      if (plMath::Abs(vDirection.GetData()[axis]) < 0.000001f)
+      {
+        if (vStart.GetData()[axis] < bounds.m_vMin.GetData()[axis] || vStart.GetData()[axis] > bounds.m_vMax.GetData()[axis])
+          fEnd = -1.0f;
+        continue;
+      }
+      const float a = (bounds.m_vMin.GetData()[axis] - vStart.GetData()[axis]) / vDirection.GetData()[axis];
+      const float b = (bounds.m_vMax.GetData()[axis] - vStart.GetData()[axis]) / vDirection.GetData()[axis];
+      fBegin = plMath::Max(fBegin, plMath::Min(a, b));
+      fEnd = plMath::Min(fEnd, plMath::Max(a, b));
+    }
+    if (fBegin > fEnd)
+      continue;
+
+    plWaterSurfaceQuery query;
+    auto Sample = [&](float t, plWaterSurfaceResult& result)
+    {
+      query.m_vPosition = vStart + vDirection * t;
+      if (!SampleBody(slot, query, m_uiSimulationTick, result))
+        return false;
+      ApplyJunctions(query, m_uiSimulationTick, result);
+      return true;
+    };
+
+    const plUInt32 steps = plMath::Max(1u, static_cast<plUInt32>(plMath::Ceil((fEnd - fBegin) / 0.1f)));
+    plWaterSurfaceResult previous;
+    bool bPreviousValid = false;
+    float fPrevious = fBegin;
+    for (plUInt32 i = 0; i <= steps; ++i)
+    {
+      float t = plMath::Lerp(fBegin, fEnd, static_cast<float>(i) / steps);
+      plWaterSurfaceResult current;
+      const bool bValid = Sample(t, current);
+      if (bValid && bPreviousValid && (previous.m_fDepth < 0.0f) != (current.m_fDepth < 0.0f))
+      {
+        float a = fPrevious;
+        float b = t;
+        for (plUInt32 refine = 0; refine < 16 && b - a > 0.001f; ++refine)
+        {
+          const float mid = (a + b) * 0.5f;
+          plWaterSurfaceResult middle;
+          if (!Sample(mid, middle))
+            break;
+          if ((middle.m_fDepth < 0.0f) == (previous.m_fDepth < 0.0f))
+            a = mid;
+          else
+            b = mid;
+        }
+        t = (a + b) * 0.5f;
+        if (Sample(t, current))
+        {
+          out_result = current;
+          fClosest = t;
+          bHit = true;
+          break;
+        }
+      }
+      if (bValid && plMath::Abs(current.m_fDepth) <= 0.0001f)
+      {
+        out_result = current;
+        fClosest = t;
+        bHit = true;
+        break;
+      }
+      previous = current;
+      bPreviousValid = bValid;
+      fPrevious = t;
+    }
+  }
+  if (bHit)
+    out_fDistance = fClosest;
+  return bHit;
+}
+
 bool plWaterWorldModule::SampleBody(const BodySlot& slot, const plWaterSurfaceQuery& query, plUInt64 uiSimulationTick,
   plWaterSurfaceResult& out_result) const
 {

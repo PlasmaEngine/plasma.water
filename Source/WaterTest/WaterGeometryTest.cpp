@@ -1,11 +1,30 @@
 #include <WaterTest/WaterTestPCH.h>
 
 #include <WaterPlugin/Utils/WaterGeometry.h>
+#include <WaterPlugin/Utils/WaterNetworkMesher.h>
 
 PL_CREATE_SIMPLE_TEST_GROUP(Water);
 
 PL_CREATE_SIMPLE_TEST(Water, Geometry)
 {
+  PL_TEST_BLOCK(plTestBlock::Enabled, "Woodland AB05 lake surface and volume fit the finite budget")
+  {
+    // Original GameSDK WaterVolume polygon, in its local XY plane. Move In chooses 1.454 m cells.
+    const plVec3 boundary[] = {
+      plVec3(0, 0, 0), plVec3(-189.274048f, 57.698853f, 0), plVec3(-301.737244f, -5.669067f, 0),
+      plVec3(-347.844849f, -87.974487f, 0), plVec3(-353.702881f, -183.760864f, 0),
+      plVec3(-294.195557f, -182.943359f, 0), plVec3(-275.683899f, -118.03894f, 0),
+      plVec3(-217.359009f, -109.46521f, 0), plVec3(-160.14209f, -34.018555f, 0), plVec3(-10.504272f, -50.528076f, 0)};
+    plWaterFiniteMeshSettings settings;
+    settings.m_fTargetEdgeLength = 1.454f;
+    plDynamicArray<plWaterGeometryVertex> surface, volume;
+    plDynamicArray<plUInt32> surfaceIndices, volumeIndices;
+    PL_TEST_BOOL(plWaterGeometry::TriangulateLake(boundary, surface, surfaceIndices, 0.001f, settings).Succeeded());
+    PL_TEST_BOOL(!surface.IsEmpty() && surface.GetCount() < 131072);
+    PL_TEST_BOOL(plWaterNetworkMesher::BuildVolume(surface, surfaceIndices, 10.0f, volume, volumeIndices));
+    PL_TEST_BOOL(!volumeIndices.IsEmpty() && volume.GetCount() <= 262144);
+  }
+
   PL_TEST_BLOCK(plTestBlock::Enabled, "Concave lake ear clipping")
   {
     const plVec3 boundary[] = {
