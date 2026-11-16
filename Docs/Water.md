@@ -57,6 +57,24 @@ glint and the light on foam are shadowed by whatever shades the surface, clouds 
 
 Alpha of the two colours is not used any more. Absorption and Scattering are what the underwater view uses.
 
+**Reflections**
+
+What the surface mirrors comes from two places: what is on screen (screen-space reflections), and the reflection
+probe or sky light around it where the screen has nothing.
+
+- The screen-space reflection reaches further the further away the water is (up to 400 m on calm water, 18 m on
+  rough water), so a lake seen from eye height mirrors its far shore, not only the near one.
+- It does not fade out at grazing angles. Calm water seen from a standing person is grazing almost everywhere, and
+  that is where it mirrors the shore. Only the last fraction of a degree is faded.
+- The mirror image is taken about a flattened normal: small waves wobble the reflection of the shore instead of
+  breaking it up.
+- Calm water reads the probe at its horizon, which is the shore. Only rough water looks higher, towards the sky.
+- Global illumination does not replace the probe on water. What GI stores for that pixel is the lit bed under the
+  water, not the water's reflection.
+
+For lakes that mirror their surroundings, place a reflection probe that captures the scene over the lake, with a
+far plane that reaches the far shore.
+
 ## Joining bodies
 
 Bodies do not blend because they overlap. A **Water Junction** component names two bodies and joins them. Place its
@@ -103,8 +121,15 @@ level, wider than the shore, or the end already has a junction), and both bodies
 - **A river is missing a piece in a tight bend.** It bends more tightly than it is wide. The log names the body and
   counts the triangles left out. Widen the bend or narrow the river there. (Before 2.0 such a river was not drawn at
   all, and nothing said so.)
-- **Reflections near the horizon look like bare ground.** A sky-light probe that captures the scene shows the sea bed
-  where the sea is, because water is not in it. The surface asks the probe above the horizon to stay clear of it; a
-  probe that only captures the sky has no such problem.
+- **Reflections near the horizon look like bare ground.** A probe that captures the scene shows the sea bed where
+  the sea is, because water is not in it. Rough water asks the probe above the horizon to stay clear of it; calm
+  water reads the horizon, so on an open sea use a probe that only captures the sky, or keep the bed out of the
+  probe's view.
+- **A lake does not mirror its far shore.** The shore is off screen and the probe does not see it: place a probe
+  that captures the scene over the lake, with a far plane that reaches the far shore.
+- **A large lake is not drawn at all**, and the log says the body "produced a mesh that is invalid or too large".
+  The shore is so long, or the profile's **Finite Mesh Cell Size** so small, that even the coarsest mesh does not fit
+  the vertex budget of a lake. Make the cell size larger. (Lakes refine their surface to a little under half the budget,
+  so that the volume below the surface fits too; before that, large lakes were dropped this way.)
 - **A floating object sits wrong on a stormy sea.** Gameplay follows the four regular swells, not the spectrum. The
   spectrum adds at most about four times its standard deviation (twice the Wave Amplitude) on top.
