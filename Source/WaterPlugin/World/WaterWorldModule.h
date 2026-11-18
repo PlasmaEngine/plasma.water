@@ -6,6 +6,7 @@
 #include <Foundation/Math/Transform.h>
 #include <Foundation/Threading/Mutex.h>
 #include <GameEngine/Interfaces/WaterWorldModule.h>
+#include <RendererCore/Debug/DebugRenderer.h>
 #include <RendererCore/Meshes/MeshBufferResource.h>
 #include <WaterPlugin/Resources/WaterProfileResource.h>
 #include <WaterPlugin/Utils/WaterGeometry.h>
@@ -310,4 +311,18 @@ private:
   plTime m_LastDraftTime;
   static constexpr double s_fFixedStepSeconds = 1.0 / 60.0;
   static constexpr double s_fDraftSettleSeconds = 0.35;
+
+  /// The edges of one body's mesh as the Water.Debug.ShowBodies overlay draws them: each edge once. Kept until the
+  /// body's geometry changes, so the overlay costs one copy per frame instead of walking every triangle.
+  struct DebugBodyLines
+  {
+    plUInt32 m_uiGeneration = 0;
+    plUInt32 m_uiGeometryRevision = 0;
+    plUInt32 m_uiIndexCount = plInvalidIndex;
+    plDynamicArray<plDebugRenderer::Line> m_Lines;
+  };
+
+  plArrayPtr<const plDebugRenderer::Line> GetDebugBodyLines(plUInt32 uiSlot, const BodySlot& slot, const plColor& color) const;
+
+  mutable plDynamicArray<DebugBodyLines> m_DebugBodyLines; ///< by body slot; empty while the overlay is off
 };

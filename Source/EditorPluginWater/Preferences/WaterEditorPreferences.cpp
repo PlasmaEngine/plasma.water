@@ -7,10 +7,11 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plWaterEditorPreferences, 1, plRTTIDefaultAlloca
 {
   PL_BEGIN_PROPERTIES
   {
-    PL_ACCESSOR_PROPERTY("ShowBodies", GetShowBodies, SetShowBodies)->AddAttributes(new plDefaultValueAttribute(true), new plGroupAttribute("Debug Overlays")),
+    // Every overlay starts off: a new project or a new user gets no debug drawing they did not ask for.
+    PL_ACCESSOR_PROPERTY("ShowBodies", GetShowBodies, SetShowBodies)->AddAttributes(new plDefaultValueAttribute(false), new plGroupAttribute("Debug Overlays")),
     PL_ACCESSOR_PROPERTY("ShowLod", GetShowLod, SetShowLod)->AddAttributes(new plDefaultValueAttribute(false), new plGroupAttribute("Debug Overlays")),
     PL_ACCESSOR_PROPERTY("ShowFlow", GetShowFlow, SetShowFlow)->AddAttributes(new plDefaultValueAttribute(false), new plGroupAttribute("Debug Overlays")),
-    PL_ACCESSOR_PROPERTY("ShowJunctions", GetShowJunctions, SetShowJunctions)->AddAttributes(new plDefaultValueAttribute(true), new plGroupAttribute("Debug Overlays")),
+    PL_ACCESSOR_PROPERTY("ShowJunctions", GetShowJunctions, SetShowJunctions)->AddAttributes(new plDefaultValueAttribute(false), new plGroupAttribute("Debug Overlays")),
     PL_ACCESSOR_PROPERTY("ShowInteractions", GetShowInteractions, SetShowInteractions)->AddAttributes(new plDefaultValueAttribute(false), new plGroupAttribute("Debug Overlays")),
     PL_ACCESSOR_PROPERTY("ShowUnderwaterVolumes", GetShowUnderwaterVolumes, SetShowUnderwaterVolumes)->AddAttributes(new plDefaultValueAttribute(false), new plGroupAttribute("Debug Overlays")),
   }
