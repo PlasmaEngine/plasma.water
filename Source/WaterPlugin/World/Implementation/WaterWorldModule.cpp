@@ -4,6 +4,7 @@
 #include <Core/ResourceManager/Implementation/ResourceLock.h>
 #include <Core/World/World.h>
 #include <Foundation/Configuration/CVar.h>
+#include <Foundation/Containers/HashSet.h>
 #include <Foundation/Containers/HashTable.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 #include <RendererCore/Meshes/MeshBufferResource.h>
@@ -243,15 +244,59 @@ void plWaterWorldModule::Update(const plWorldModule::UpdateContext& context)
   DrawDebug();
 }
 
+plArrayPtr<const plDebugRenderer::Line> plWaterWorldModule::GetDebugBodyLines(plUInt32 uiSlot, const BodySlot& slot, const plColor& color) const
+{
+  if (m_DebugBodyLines.GetCount() <= uiSlot)
+    m_DebugBodyLines.SetCount(uiSlot + 1);
+
+  DebugBodyLines& cache = m_DebugBodyLines[uiSlot];
+  const plWaterBodySnapshot& body = slot.m_Data;
+
+  if (cache.m_uiGeneration != slot.m_uiGeneration || cache.m_uiGeometryRevision != body.m_uiGeometryRevision || cache.m_uiIndexCount != body.m_Indices.GetCount())
+  {
+    cache.m_uiGeneration = slot.m_uiGeneration;
+    cache.m_uiGeometryRevision = body.m_uiGeometryRevision;
+    cache.m_uiIndexCount = body.m_Indices.GetCount();
+    cache.m_Lines.Clear();
+
+    // Two triangles share most edges; each is drawn once.
+    plHashSet<plUInt64> edges;
+    edges.Reserve(body.m_Indices.GetCount());
+    auto AddEdge = [&](plUInt32 uiA, plUInt32 uiB)
+    {
+      const plUInt64 uiKey = (static_cast<plUInt64>(plMath::Min(uiA, uiB)) << 32) | plMath::Max(uiA, uiB);
+      if (!edges.Insert(uiKey))
+        cache.m_Lines.PushBack(plDebugRenderer::Line(body.m_Vertices[uiA].m_vPosition, body.m_Vertices[uiB].m_vPosition, color));
+    };
+
+    for (plUInt32 i = 0; i + 2 < body.m_Indices.GetCount(); i += 3)
+    {
+      AddEdge(body.m_Indices[i], body.m_Indices[i + 1]);
+      AddEdge(body.m_Indices[i + 1], body.m_Indices[i + 2]);
+      AddEdge(body.m_Indices[i + 2], body.m_Indices[i]);
+    }
+  }
+
+  return cache.m_Lines.GetArrayPtr();
+}
+
 void plWaterWorldModule::DrawDebug() const
 {
+  if (!cvar_WaterDebugShowBodies && !m_DebugBodyLines.IsEmpty())
+  {
+    PL_LOCK(m_Mutex);
+    m_DebugBodyLines.Clear();
+    m_DebugBodyLines.Compact();
+  }
+
   if (!cvar_WaterDebugShowBodies && !cvar_WaterDebugShowLod && !cvar_WaterDebugShowFlow && !cvar_WaterDebugShowJunctions &&
       !cvar_WaterDebugShowInteractions && !cvar_WaterDebugShowUnderwaterVolumes)
     return;
 
   PL_LOCK(m_Mutex);
-  for (const BodySlot& slot : m_Bodies)
+  for (plUInt32 uiSlot = 0; uiSlot < m_Bodies.GetCount(); ++uiSlot)
   {
+    const BodySlot& slot = m_Bodies[uiSlot];
     if (!slot.m_bInUse)
       continue;
 
@@ -261,17 +306,9 @@ void plWaterWorldModule::DrawDebug() const
                                                                                   : plColor::CornflowerBlue;
     if (cvar_WaterDebugShowBodies && body.m_Descriptor.m_Type != plWaterBodyType::Ocean)
     {
-      plHybridArray<plDebugRenderer::Line, 128> lines;
-      for (plUInt32 i = 0; i + 2 < body.m_Indices.GetCount(); i += 3)
-      {
-        const plVec3& a = body.m_Vertices[body.m_Indices[i]].m_vPosition;
-        const plVec3& b = body.m_Vertices[body.m_Indices[i + 1]].m_vPosition;
-        const plVec3& c = body.m_Vertices[body.m_Indices[i + 2]].m_vPosition;
-        lines.PushBack(plDebugRenderer::Line(a, b, bodyColor));
-        lines.PushBack(plDebugRenderer::Line(b, c, bodyColor));
-        lines.PushBack(plDebugRenderer::Line(c, a, bodyColor));
-      }
-      plDebugRenderer::DrawLines(GetWorld(), lines, bodyColor);
+      const plArrayPtr<const plDebugRenderer::Line> lines = GetDebugBodyLines(uiSlot, slot, bodyColor);
+      if (!lines.IsEmpty())
+        plDebugRenderer::DrawLines(GetWorld(), lines, bodyColor);
     }
 
     if (cvar_WaterDebugShowFlow && body.m_Descriptor.m_Type == plWaterBodyType::River)

@@ -39,10 +39,10 @@ public:
 private:
   void ProcessEventHandler(const plEditorEngineProcessConnection::Event& e);
 
-  bool m_bShowBodies = true;
+  bool m_bShowBodies = false;
   bool m_bShowLod = false;
   bool m_bShowFlow = false;
-  bool m_bShowJunctions = true;
+  bool m_bShowJunctions = false;
   bool m_bShowInteractions = false;
   bool m_bShowUnderwaterVolumes = false;
 };
